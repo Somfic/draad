@@ -1,0 +1,13 @@
+{
+    "name": "hello-frontend",
+    "version": "1.0.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "start": "bun run src/main.ts"
+    },
+    "devDependencies": {
+        "@types/bun": "^1.1.0",
+        "typescript": "^6.0.3"
+    }
+}

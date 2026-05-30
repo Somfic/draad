@@ -1,0 +1,17 @@
+[package]
+name = "hello"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+draad = { path = "../../crates/draad", features = ["runtime"] }
+async-trait = "0.1"
+axum = { version = "0.8", features = ["macros"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tower-http = { version = "0.6", features = ["cors"] }
+
+[build-dependencies]
+draad = { path = "../../crates/draad", features = ["codegen"] }

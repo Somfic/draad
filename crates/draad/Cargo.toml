@@ -1,0 +1,31 @@
+[package]
+name = "draad"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Trait-driven RPC schema for Rust↔TypeScript. One trait → Axum router + TS client."
+
+[features]
+# The codegen module. Enable for `build.rs` / standalone bin; off for runtime
+# so consumers don't pay the syn dep at runtime.
+codegen = ["dep:syn", "dep:quote", "dep:proc-macro2"]
+
+# The `runtime` module: ships `Response`/`ok`, `EventBus`, and the
+# default `ws_handler` so consumers don't have to hand-write the axum
+# response shim or the broadcast plumbing. Opt-in.
+runtime = ["dep:axum", "dep:serde", "dep:serde_json", "dep:tokio"]
+
+[dependencies]
+draad-macros = { path = "../draad-macros", version = "0.1.0" }
+
+# Codegen-only, opt in via the `codegen` feature.
+syn = { version = "2", features = ["full", "extra-traits"], optional = true }
+quote = { version = "1", optional = true }
+proc-macro2 = { version = "1", optional = true }
+
+# Runtime-only, opt in via the `runtime` feature.
+axum = { version = "0.8", optional = true, features = ["ws"] }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+tokio = { version = "1", optional = true, features = ["sync", "macros"] }

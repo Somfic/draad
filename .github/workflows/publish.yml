@@ -1,0 +1,74 @@
+name: Publish
+
+# Triggered when a human clicks "publish" on the draft release created by
+# `release.yml`. Retags `vX.Y.Z-draft` → `vX.Y.Z`, then publishes both
+# crates to crates.io in dependency order.
+#
+# Requires the `CARGO_REGISTRY_TOKEN` repo secret (crates.io → Account
+# Settings → API Access → New Token; scope "publish-update" is enough).
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  retag:
+    name: retag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Retag to stable version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DRAFT_TAG="${{ github.event.release.tag_name }}"
+          VERSION="${DRAFT_TAG%-draft}"
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          if [ "$DRAFT_TAG" = "$VERSION" ]; then
+            echo "Tag is already stable, skipping retag"
+            exit 0
+          fi
+
+          COMMIT=$(git rev-list -n 1 "$DRAFT_TAG")
+          git tag "$VERSION" "$COMMIT"
+          git push origin "$VERSION"
+
+          gh release edit "$DRAFT_TAG" --tag "$VERSION"
+          git push origin ":refs/tags/${DRAFT_TAG}"
+
+  publish:
+    name: cargo publish
+    needs: retag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.retag.outputs.version }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # draad depends on draad-macros, so macros must hit the registry first.
+      # `cargo publish` (Cargo ≥1.66) blocks until the just-uploaded version
+      # is resolvable, so the second publish sees draad-macros immediately.
+      - name: Publish draad-macros
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p draad-macros
+
+      - name: Publish draad
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p draad
