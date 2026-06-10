@@ -1,13 +1,16 @@
 //! AST parsing: turns `#[api]` / `#[events]` traits into the internal
 //! [`Api`](super::model::Api) / [`EventApi`](super::model::EventApi)
-//! representation, plus the Rust→TS type-mapping helpers used along the
-//! way.
+//! representation. Type-shape conversion lives in
+//! [`super::types`]; this module just walks `syn` and assembles the
+//! model.
 
 use std::collections::BTreeSet;
-use syn::{FnArg, GenericArgument, ItemTrait, Pat, PathArguments, ReturnType, TraitItem, Type};
+use syn::{FnArg, ItemTrait, Pat, ReturnType, TraitItem, Type};
 
-use super::model::{Api, Event, EventApi, Method, Param};
-use super::scan::extract_docs;
+use super::model::{Api, Event, EventApi, Method, Param, Verb};
+use super::scan::{attr_path_matches, extract_docs};
+use super::types::{extract_result_inner_ts, is_query_safe, rust_type_to_string, rust_type_to_ts};
+use super::util::snake_to_camel;
 
 pub(super) fn parse_trait(
     t: &ItemTrait,
@@ -24,39 +27,24 @@ pub(super) fn parse_trait(
         let ts_name = snake_to_camel(&rust_name);
         let command = format!("{namespace}_{rust_name}");
         let docs = extract_docs(&method.attrs);
+        let verb = parse_verb(&method.attrs, &rust_name);
+        let params = parse_params(&method.sig.inputs, &method.sig.ident, imports);
+        let (ret_ts, ret_rust, returns_result) = parse_return(&method.sig.output, imports);
 
-        let mut params = Vec::new();
-        for arg in &method.sig.inputs {
-            let FnArg::Typed(pat) = arg else { continue };
-            let name = match &*pat.pat {
-                Pat::Ident(p) => p.ident.to_string(),
-                _ => panic!("unsupported param pattern in {}", method.sig.ident),
-            };
-            let docs = extract_docs(&pat.attrs);
-            let ts_type = rust_type_to_ts(&pat.ty, imports);
-            let rust_type = rust_type_to_string(&pat.ty);
-            params.push(Param {
-                name,
-                ts_type,
-                rust_type,
-                docs,
-            });
-        }
-
-        let (ret_ts, ret_rust, returns_result) = match &method.sig.output {
-            ReturnType::Type(_, ty) => {
-                let is_result = matches!(ty.as_ref(), Type::Path(p) if {
-                    let seg = p.path.segments.last().unwrap();
-                    seg.ident == "Result" || seg.ident == "RpcResult"
-                });
-                (
-                    extract_result_inner_ts(ty, imports),
-                    rust_type_to_string(ty),
-                    is_result,
-                )
+        if !verb.has_body() {
+            for p in &params {
+                if !is_query_safe(&p.rust_type) {
+                    panic!(
+                        "method `{rust_name}` parameter `{name}: {ty}` is not \
+                         query-string-safe. GET/DELETE methods may only take \
+                         primitives (String, bool, integer, float), \
+                         Option<primitive>, or Vec<primitive>.",
+                        name = p.name,
+                        ty = p.rust_type,
+                    );
+                }
             }
-            ReturnType::Default => ("void".into(), "()".into(), false),
-        };
+        }
 
         methods.push(Method {
             rust_name,
@@ -67,6 +55,7 @@ pub(super) fn parse_trait(
             ret_rust,
             returns_result,
             docs,
+            verb,
         });
     }
     Api {
@@ -75,25 +64,6 @@ pub(super) fn parse_trait(
         class_name: t.ident.to_string(),
         docs: extract_docs(&t.attrs),
         methods,
-    }
-}
-
-impl Method {
-    pub(super) fn ret_rust_ok(&self) -> String {
-        if !self.returns_result {
-            return self.ret_rust.clone();
-        }
-        match syn::parse_str::<Type>(&self.ret_rust) {
-            Ok(Type::Path(p)) => {
-                let seg = p.path.segments.last().unwrap();
-                if let Some(inner) = first_generic(&seg.arguments) {
-                    rust_type_to_string(inner)
-                } else {
-                    "()".into()
-                }
-            }
-            _ => "()".into(),
-        }
     }
 }
 
@@ -135,96 +105,70 @@ pub(super) fn parse_events_trait(
     }
 }
 
-pub(super) fn snake_to_camel(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut upper = false;
-    for c in s.chars() {
-        if c == '_' {
-            upper = true;
-        } else if upper {
-            out.extend(c.to_uppercase());
-            upper = false;
-        } else {
-            out.push(c);
-        }
+fn parse_params(
+    inputs: &syn::punctuated::Punctuated<FnArg, syn::Token![,]>,
+    method_ident: &syn::Ident,
+    imports: &mut BTreeSet<String>,
+) -> Vec<Param> {
+    let mut params = Vec::new();
+    for arg in inputs {
+        let FnArg::Typed(pat) = arg else { continue };
+        let name = match &*pat.pat {
+            Pat::Ident(p) => p.ident.to_string(),
+            _ => panic!("unsupported param pattern in {method_ident}"),
+        };
+        params.push(Param {
+            name,
+            ts_type: rust_type_to_ts(&pat.ty, imports),
+            rust_type: rust_type_to_string(&pat.ty),
+            docs: extract_docs(&pat.attrs),
+        });
     }
-    out
+    params
 }
 
-fn rust_type_to_string(ty: &Type) -> String {
-    use quote::ToTokens;
-    let raw = ty.to_token_stream().to_string();
-    let bytes = raw.as_bytes();
-    let mut out = String::with_capacity(raw.len());
-    for (i, &b) in bytes.iter().enumerate() {
-        if b != b' ' {
-            out.push(b as char);
-            continue;
+fn parse_return(output: &ReturnType, imports: &mut BTreeSet<String>) -> (String, String, bool) {
+    match output {
+        ReturnType::Type(_, ty) => {
+            let returns_result = matches!(ty.as_ref(), Type::Path(p) if {
+                let seg = p.path.segments.last().unwrap();
+                seg.ident == "Result" || seg.ident == "RpcResult"
+            });
+            (
+                extract_result_inner_ts(ty, imports),
+                rust_type_to_string(ty),
+                returns_result,
+            )
         }
-        let prev = bytes.get(i.wrapping_sub(1)).copied().unwrap_or(0);
-        let next = bytes.get(i + 1).copied().unwrap_or(0);
-        let prev_join = matches!(prev, b'<' | b'(' | b':' | b',' | b'&');
-        let next_join = matches!(next, b'<' | b'>' | b'(' | b')' | b':' | b',' | b';');
-        if prev_join || next_join {
-            continue;
-        }
-        out.push(' ');
-    }
-    out
-}
-
-fn rust_type_to_ts(ty: &Type, imports: &mut BTreeSet<String>) -> String {
-    match ty {
-        Type::Tuple(t) if t.elems.is_empty() => "void".into(),
-        Type::Path(p) => {
-            let seg = p.path.segments.last().unwrap();
-            let name = seg.ident.to_string();
-            match name.as_str() {
-                "String" | "str" => "string".into(),
-                "bool" => "boolean".into(),
-                "u8" | "u16" | "u32" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" | "isize"
-                | "f32" | "f64" => "number".into(),
-                "Vec" => {
-                    let inner = first_generic(&seg.arguments)
-                        .map(|t| rust_type_to_ts(t, imports))
-                        .unwrap_or_else(|| "unknown".into());
-                    format!("{inner}[]")
-                }
-                "Option" => {
-                    let inner = first_generic(&seg.arguments)
-                        .map(|t| rust_type_to_ts(t, imports))
-                        .unwrap_or_else(|| "unknown".into());
-                    format!("{inner} | null")
-                }
-                _ => {
-                    imports.insert(name.clone());
-                    name
-                }
-            }
-        }
-        _ => "unknown".into(),
+        ReturnType::Default => ("void".into(), "()".into(), false),
     }
 }
 
-fn extract_result_inner_ts(ty: &Type, imports: &mut BTreeSet<String>) -> String {
-    if let Type::Path(p) = ty {
-        let seg = p.path.segments.last().unwrap();
-        if seg.ident == "Result" || seg.ident == "RpcResult" {
-            if let Some(inner) = first_generic(&seg.arguments) {
-                return rust_type_to_ts(inner, imports);
+/// Pull a verb override off a trait method's attribute list. Recognises
+/// `#[get]`, `#[post]`, `#[put]`, `#[patch]`, `#[delete]` (bare or
+/// `#[draad::...]`-qualified). At most one may appear; otherwise we panic
+/// with the offending method name so the build fails loudly.
+fn parse_verb(attrs: &[syn::Attribute], method_name: &str) -> Verb {
+    const CANDIDATES: &[(&str, Verb)] = &[
+        ("get", Verb::Get),
+        ("post", Verb::Post),
+        ("put", Verb::Put),
+        ("patch", Verb::Patch),
+        ("delete", Verb::Delete),
+    ];
+    let mut found: Option<(&'static str, Verb)> = None;
+    for attr in attrs {
+        for (name, verb) in CANDIDATES {
+            if attr_path_matches(attr.path(), name) {
+                if let Some((prev, _)) = found {
+                    panic!(
+                        "method `{method_name}` has conflicting verb attributes \
+                         `#[{prev}]` and `#[{name}]`; pick one"
+                    );
+                }
+                found = Some((name, *verb));
             }
         }
     }
-    rust_type_to_ts(ty, imports)
-}
-
-fn first_generic(args: &PathArguments) -> Option<&Type> {
-    if let PathArguments::AngleBracketed(a) = args {
-        for arg in &a.args {
-            if let GenericArgument::Type(t) = arg {
-                return Some(t);
-            }
-        }
-    }
-    None
+    found.map(|(_, v)| v).unwrap_or(Verb::Post)
 }

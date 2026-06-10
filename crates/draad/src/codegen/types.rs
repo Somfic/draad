@@ -1,0 +1,164 @@
+//! Rust ⇄ TypeScript type mapping. `parse_trait` and `parse_events_trait`
+//! consume `syn::Type` nodes and ask this module to turn them into either
+//! a TS type expression (for the generated client) or a normalised Rust
+//! type string (for the generated handler args struct).
+//!
+//! All knowledge of which `Verb` arg shapes are query-string-safe lives
+//! here too, since it's a question about Rust types.
+
+use std::collections::BTreeSet;
+
+use syn::{GenericArgument, PathArguments, Type};
+
+/// Map a Rust type to its TypeScript counterpart, recording any
+/// user-defined types seen on the way so the caller can emit the right
+/// `import` lines.
+pub(super) fn rust_type_to_ts(ty: &Type, imports: &mut BTreeSet<String>) -> String {
+    match ty {
+        Type::Tuple(t) if t.elems.is_empty() => "void".into(),
+        Type::Path(p) => {
+            let seg = p.path.segments.last().unwrap();
+            let name = seg.ident.to_string();
+            match name.as_str() {
+                "String" | "str" => "string".into(),
+                "bool" => "boolean".into(),
+                "u8" | "u16" | "u32" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" | "isize"
+                | "f32" | "f64" => "number".into(),
+                "Vec" => {
+                    let inner = first_generic(&seg.arguments)
+                        .map(|t| rust_type_to_ts(t, imports))
+                        .unwrap_or_else(|| "unknown".into());
+                    format!("{inner}[]")
+                }
+                "Option" => {
+                    let inner = first_generic(&seg.arguments)
+                        .map(|t| rust_type_to_ts(t, imports))
+                        .unwrap_or_else(|| "unknown".into());
+                    format!("{inner} | null")
+                }
+                _ => {
+                    imports.insert(name.clone());
+                    name
+                }
+            }
+        }
+        _ => "unknown".into(),
+    }
+}
+
+/// Stringify a `syn::Type` in the same shape the generated Rust file
+/// expects (compact, no stray spaces around `<`, `:`, etc.).
+pub(super) fn rust_type_to_string(ty: &Type) -> String {
+    use quote::ToTokens;
+    let raw = ty.to_token_stream().to_string();
+    let bytes = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len());
+    for (i, &b) in bytes.iter().enumerate() {
+        if b != b' ' {
+            out.push(b as char);
+            continue;
+        }
+        let prev = bytes.get(i.wrapping_sub(1)).copied().unwrap_or(0);
+        let next = bytes.get(i + 1).copied().unwrap_or(0);
+        let prev_join = matches!(prev, b'<' | b'(' | b':' | b',' | b'&');
+        let next_join = matches!(next, b'<' | b'>' | b'(' | b')' | b':' | b',' | b';');
+        if prev_join || next_join {
+            continue;
+        }
+        out.push(' ');
+    }
+    out
+}
+
+/// Map the *inner* type of a `Result<T, _>` return to TS. For non-Result
+/// returns this is equivalent to [`rust_type_to_ts`] on the whole type.
+pub(super) fn extract_result_inner_ts(ty: &Type, imports: &mut BTreeSet<String>) -> String {
+    if let Type::Path(p) = ty {
+        let seg = p.path.segments.last().unwrap();
+        if seg.ident == "Result" || seg.ident == "RpcResult" {
+            if let Some(inner) = first_generic(&seg.arguments) {
+                return rust_type_to_ts(inner, imports);
+            }
+        }
+    }
+    rust_type_to_ts(ty, imports)
+}
+
+/// Given the stringified return type of a method (already normalised by
+/// [`rust_type_to_string`]), pull out the `Ok` half of a `Result<Ok, _>`
+/// so the generated handler can declare `Response<Ok>`. Non-result
+/// returns pass through unchanged.
+pub(super) fn result_ok_type(returns_result: bool, ret_rust: &str) -> String {
+    if !returns_result {
+        return ret_rust.to_string();
+    }
+    match syn::parse_str::<Type>(ret_rust) {
+        Ok(Type::Path(p)) => {
+            let seg = p.path.segments.last().unwrap();
+            if let Some(inner) = first_generic(&seg.arguments) {
+                rust_type_to_string(inner)
+            } else {
+                "()".into()
+            }
+        }
+        _ => "()".into(),
+    }
+}
+
+pub(super) fn first_generic(args: &PathArguments) -> Option<&Type> {
+    if let PathArguments::AngleBracketed(a) = args {
+        for arg in &a.args {
+            if let GenericArgument::Type(t) = arg {
+                return Some(t);
+            }
+        }
+    }
+    None
+}
+
+// ── query-string safety ──────────────────────────────────────────────
+//
+// GET/DELETE methods deserialise their args from the query string via
+// `axum::extract::Query`, which delegates to `serde_urlencoded`. Only
+// primitives, `Option<primitive>`, and `Vec<primitive>` round-trip
+// cleanly — anything else silently fails at runtime. We reject the
+// rest at codegen time.
+
+pub(super) fn is_query_safe(rust_type: &str) -> bool {
+    let t = rust_type.trim();
+    if is_primitive(t) {
+        return true;
+    }
+    if let Some(inner) = strip_wrapper(t, "Option").or_else(|| strip_wrapper(t, "Vec")) {
+        return is_primitive(inner.trim());
+    }
+    false
+}
+
+fn is_primitive(t: &str) -> bool {
+    matches!(
+        t,
+        "String"
+            | "str"
+            | "bool"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "usize"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "isize"
+            | "f32"
+            | "f64"
+    )
+}
+
+/// `strip_wrapper("Option<String>", "Option")` → `Some("String")`.
+fn strip_wrapper<'a>(t: &'a str, name: &str) -> Option<&'a str> {
+    let rest = t.strip_prefix(name)?.trim_start();
+    let inner = rest.strip_prefix('<')?.strip_suffix('>')?;
+    Some(inner)
+}

@@ -5,7 +5,7 @@ use draad::api;
 #[api(namespace = "greet")]
 pub trait GreetApi {
     /// Returns a personalized greeting
-    async fn hello(&self, name: String) -> String;
+    async fn hello(&self, names: String) -> String;
 
     /// Adds two numbers
     async fn add(&self, a: i32, b: i32) -> i32;

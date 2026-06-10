@@ -47,15 +47,26 @@ use syn::{
 
 /// Derives the standard set of traits for any type that crosses the
 /// frontend/backend boundary: serde for the wire, ts-rs for the TypeScript
-/// counterpart. Per-type ts-rs bindings land in
-/// `target/draad-bindings/_per_type/` where `draad-codegen` inlines them
-/// into per-namespace TS files (configure path via `TS_RS_EXPORT_DIR`).
+/// counterpart. Per-type ts-rs bindings land in the consumer crate's
+/// `target/draad-bindings/_per_type/` — the absolute path is baked into
+/// the emitted `#[ts(export_to = ...)]` at macro expansion time, so
+/// callers don't need to set `TS_RS_EXPORT_DIR` or any other env var.
 #[proc_macro_attribute]
 pub fn ty(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
+    // CARGO_MANIFEST_DIR is set by cargo on every rustc invocation to
+    // the path of the crate currently being compiled — i.e. the
+    // consumer's package dir during proc-macro expansion. Falling back
+    // to a relative path keeps the macro usable in odd contexts where
+    // the var isn't set (e.g. rust-analyzer in some configurations);
+    // ts-rs will resolve it against its own default base then.
+    let export_to = match std::env::var("CARGO_MANIFEST_DIR") {
+        Ok(dir) => format!("{dir}/target/draad-bindings/_per_type/"),
+        Err(_) => "_per_type/".to_string(),
+    };
     quote! {
         #[derive(Debug, Clone, ::serde::Serialize, ::serde::Deserialize, ::ts_rs::TS)]
-        #[ts(export, export_to = "_per_type/")]
+        #[ts(export, export_to = #export_to)]
         #input
     }
     .into()
@@ -96,13 +107,25 @@ fn parse_namespace(attr: TokenStream, macro_name: &str) -> Result<String, TokenS
 /// and injects `#[async_trait]`. On an `impl ... for State`: no args, just
 /// shorthand for `#[async_trait]`. The codegen reads the namespace from
 /// source.
+///
+/// `#[get]` / `#[post]` / `#[put]` / `#[patch]` / `#[delete]` markers on
+/// trait methods (or impl methods) are treated as helper attributes of
+/// `#[api]`: the codegen sees them in the raw source (it parses the file
+/// directly), and this macro strips them from its expansion so they
+/// never reach rustc as standalone attributes. That avoids name clashes
+/// with `axum::routing::{get, post, ...}` and friends.
 #[proc_macro_attribute]
 pub fn api(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as syn::Item);
     match input {
-        syn::Item::Trait(t) => {
+        syn::Item::Trait(mut t) => {
             if let Err(ts) = parse_namespace(attr, "api") {
                 return ts;
+            }
+            for item in &mut t.items {
+                if let syn::TraitItem::Fn(m) = item {
+                    m.attrs.retain(|a| !is_verb_marker(a));
+                }
             }
             quote! {
                 #[::async_trait::async_trait]
@@ -110,15 +133,35 @@ pub fn api(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
             .into()
         }
-        syn::Item::Impl(i) => quote! {
-            #[::async_trait::async_trait]
-            #i
+        syn::Item::Impl(mut i) => {
+            for item in &mut i.items {
+                if let syn::ImplItem::Fn(m) = item {
+                    m.attrs.retain(|a| !is_verb_marker(a));
+                }
+            }
+            quote! {
+                #[::async_trait::async_trait]
+                #i
+            }
+            .into()
         }
-        .into(),
         other => syn::Error::new_spanned(other, "#[api] expects a trait or impl block")
             .to_compile_error()
             .into(),
     }
+}
+
+/// Bare `#[get]` / `#[draad::get]` and the four other verbs. Mirrors
+/// `attr_path_matches` over in the codegen crate, but inlined here so
+/// `draad-macros` stays self-contained.
+fn is_verb_marker(attr: &syn::Attribute) -> bool {
+    const VERBS: &[&str] = &["get", "post", "put", "patch", "delete"];
+    let path = attr.path();
+    if let Some(ident) = path.get_ident() {
+        return VERBS.contains(&ident.to_string().as_str());
+    }
+    let segs: Vec<_> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+    segs.len() == 2 && segs[0] == "draad" && VERBS.contains(&segs[1].as_str())
 }
 
 /// Declares a namespace of backend→frontend events. The annotated trait is
@@ -132,3 +175,4 @@ pub fn events(attr: TokenStream, item: TokenStream) -> TokenStream {
     let _input = parse_macro_input!(item as ItemTrait);
     TokenStream::new()
 }
+

@@ -1,6 +1,7 @@
 //! Runs draad codegen during `cargo build`. Defaults match this crate's
 //! layout (`crate::app::{AppContext, EventBus}` and the embedded
-//! `draad::runtime::{Response, ok}`), so config is minimal.
+//! `draad::runtime::{Response, ok}`), so config is minimal. `generate()`
+//! emits its own `cargo:rerun-if-changed` directives.
 
 fn main() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -12,6 +13,4 @@ fn main() {
         .client_dir("frontend/src/schema")
         .generate()
         .expect("draad codegen failed");
-
-    println!("cargo:rerun-if-changed=src");
 }

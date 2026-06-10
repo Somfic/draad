@@ -34,9 +34,9 @@ pub trait SearchApi {
     .unwrap();
 
     // Fake what ts-rs would emit during `cargo test export_bindings`.
-    // The codegen reads from `per_type_dir/_per_type/<TypeName>.ts` and
-    // inlines the body (minus imports / generated-by comments).
-    let per_type_dir = root.join("bindings/_per_type");
+    // The codegen reads from `<root>/target/draad-bindings/_per_type/`,
+    // matching the absolute path the `#[ty]` macro bakes in.
+    let per_type_dir = root.join("target/draad-bindings/_per_type");
     std::fs::create_dir_all(&per_type_dir).unwrap();
     std::fs::write(
         per_type_dir.join("Hit.ts"),
@@ -49,7 +49,6 @@ pub trait SearchApi {
     draad::codegen::Config::new()
         .root(&root)
         .client_dir(&client_dir)
-        .per_type_dir(root.join("bindings"))
         .rpc_runtime("draad::runtime::{Response, ok}")
         .generate()
         .unwrap();

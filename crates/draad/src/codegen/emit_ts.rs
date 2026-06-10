@@ -5,141 +5,17 @@
 use std::fs;
 use std::path::Path;
 
-use super::emit_rust::capitalize;
-use super::model::{Api, EventApi, Param};
-use super::scan::normalize_numbers;
+use super::model::{Api, EventApi, Param, Verb};
+use super::util::{capitalize, normalize_numbers};
+use super::writer::Writer;
 
 /// Transport interface, error type, and a default REST+WS `Rpc`
 /// implementation embedded at the top of every generated `index.ts`.
 ///
-/// The default factory `defaultRpc(...)` is tree-shaken if unused, so
-/// projects that bring their own transport pay nothing for it.
-const RPC_RUNTIME_TS: &str = "\
-/** Returned by `Rpc.listen`, call to unsubscribe. */\n\
-export type UnlistenFn = () => void;\n\
-\n\
-/**\n\
- * Transport contract the generated API classes call into. Implement this\n\
- * in your app (using fetch / axios / tauri / etc.) and pass it to\n\
- * `new Api(rpc)`. Or use `defaultRpc(...)` below.\n\
- */\n\
-export interface Rpc {\n\
-\t/** Send an RPC request. The wire command is `{namespace}/{method}`. */\n\
-\tcall<T>(command: string, args?: Record<string, unknown>): Promise<T>;\n\
-\n\
-\t/** Subscribe to a backend event. Returns an unsubscribe handle. */\n\
-\tlisten<T>(topic: string, handler: (payload: T) => void): UnlistenFn;\n\
-}\n\
-\n\
-/** Thrown (or returned) by `Rpc.call` implementations on failure. */\n\
-export class RpcError extends Error {\n\
-\tconstructor(public readonly code: string, message: string) {\n\
-\t\tsuper(message);\n\
-\t\tthis.name = \"RpcError\";\n\
-\t}\n\
-}\n\
-\n\
-export type DefaultRpcOptions = {\n\
-\t/** Base URL for RPC calls. Requests go to `${baseUrl}/${command}`. */\n\
-\tbaseUrl?: string;\n\
-\t/** WebSocket URL for events. Omit to make `listen()` throw. */\n\
-\twsUrl?: string;\n\
-\t/** Extra headers added to every RPC call. */\n\
-\theaders?: Record<string, string>;\n\
-\t/** Disable WebSocket auto-reconnect. Default: true. */\n\
-\treconnect?: boolean;\n\
-\t/** Cap on the backoff between reconnect attempts. Default: 30000. */\n\
-\tmaxReconnectDelayMs?: number;\n\
-};\n\
-\n\
-/**\n\
- * Default `Rpc` implementation: POST JSON for calls, a shared WebSocket\n\
- * for events. Wire format:\n\
- *\n\
- *  - Calls: `POST {baseUrl}/{command}` with body `args`. 2xx responses\n\
- *    are parsed as JSON and returned; non-2xx are thrown as `RpcError`.\n\
- *  - Events: WS frames shaped `{ topic: string, payload: T }`.\n\
- *\n\
- * Auto-reconnects with exponential backoff + jitter (capped at\n\
- * `maxReconnectDelayMs`) as long as there are active subscribers. Replace\n\
- * with your own `Rpc` for auth, custom transports, or a different wire\n\
- * format.\n\
- */\n\
-export function defaultRpc(opts: DefaultRpcOptions = {}): Rpc {\n\
-\tconst baseUrl = opts.baseUrl ?? \"/api\";\n\
-\tconst maxDelayMs = opts.maxReconnectDelayMs ?? 30000;\n\
-\tconst shouldReconnect = opts.reconnect !== false;\n\
-\tconst subs = new Map<string, Set<(payload: unknown) => void>>();\n\
-\tlet ws: WebSocket | undefined;\n\
-\tlet reconnectDelayMs = 500;\n\
-\tlet reconnectTimer: ReturnType<typeof setTimeout> | undefined;\n\
-\n\
-\tfunction openWs(url: string): WebSocket {\n\
-\t\tconst sock = new WebSocket(url);\n\
-\t\tsock.addEventListener(\"open\", () => { reconnectDelayMs = 500; });\n\
-\t\tsock.addEventListener(\"message\", (ev) => {\n\
-\t\t\ttry {\n\
-\t\t\t\tconst { topic, payload } = JSON.parse(String(ev.data));\n\
-\t\t\t\tsubs.get(topic)?.forEach((h) => h(payload));\n\
-\t\t\t} catch {\n\
-\t\t\t\t/* ignore malformed frames */\n\
-\t\t\t}\n\
-\t\t});\n\
-\t\tsock.addEventListener(\"close\", () => {\n\
-\t\t\tws = undefined;\n\
-\t\t\tif (!shouldReconnect || subs.size === 0) return;\n\
-\t\t\tconst base = Math.min(reconnectDelayMs, maxDelayMs);\n\
-\t\t\tconst jitter = base * (0.8 + Math.random() * 0.4);\n\
-\t\t\treconnectDelayMs = Math.min(reconnectDelayMs * 2, maxDelayMs);\n\
-\t\t\treconnectTimer = setTimeout(() => {\n\
-\t\t\t\treconnectTimer = undefined;\n\
-\t\t\t\tif (subs.size > 0 && !ws) ws = openWs(url);\n\
-\t\t\t}, jitter);\n\
-\t\t});\n\
-\t\treturn sock;\n\
-\t}\n\
-\n\
-\tfunction ensureWs(): WebSocket {\n\
-\t\tif (!opts.wsUrl) {\n\
-\t\t\tthrow new RpcError(\"NO_WS_URL\", \"defaultRpc: wsUrl not configured; cannot listen()\");\n\
-\t\t}\n\
-\t\tif (ws && ws.readyState !== WebSocket.CLOSED) return ws;\n\
-\t\tws = openWs(opts.wsUrl);\n\
-\t\treturn ws;\n\
-\t}\n\
-\n\
-\treturn {\n\
-\t\tasync call<T>(command: string, args?: Record<string, unknown>): Promise<T> {\n\
-\t\t\tconst res = await fetch(`${baseUrl}/${command}`, {\n\
-\t\t\t\tmethod: \"POST\",\n\
-\t\t\t\theaders: { \"Content-Type\": \"application/json\", ...opts.headers },\n\
-\t\t\t\tbody: JSON.stringify(args ?? {}),\n\
-\t\t\t});\n\
-\t\t\tif (!res.ok) {\n\
-\t\t\t\tthrow new RpcError(`HTTP_${res.status}`, await res.text());\n\
-\t\t\t}\n\
-\t\t\treturn (await res.json()) as T;\n\
-\t\t},\n\
-\t\tlisten<T>(topic: string, handler: (payload: T) => void): UnlistenFn {\n\
-\t\t\tensureWs();\n\
-\t\t\tlet set = subs.get(topic);\n\
-\t\t\tif (!set) {\n\
-\t\t\t\tset = new Set();\n\
-\t\t\t\tsubs.set(topic, set);\n\
-\t\t\t}\n\
-\t\t\tconst wrapped = handler as (p: unknown) => void;\n\
-\t\t\tset.add(wrapped);\n\
-\t\t\treturn () => {\n\
-\t\t\t\tset!.delete(wrapped);\n\
-\t\t\t\tif (set!.size === 0) subs.delete(topic);\n\
-\t\t\t\tif (subs.size === 0 && reconnectTimer) {\n\
-\t\t\t\t\tclearTimeout(reconnectTimer);\n\
-\t\t\t\t\treconnectTimer = undefined;\n\
-\t\t\t\t}\n\
-\t\t\t};\n\
-\t\t},\n\
-\t};\n\
-}\n";
+/// Source lives in `rpc_runtime.ts` next to this file — edit it there
+/// and rely on syntax highlighting / formatters instead of escaping the
+/// file into a Rust string literal.
+const RPC_RUNTIME_TS: &str = include_str!("rpc_runtime.ts");
 
 pub(super) fn write_index(
     out_path: &Path,
@@ -148,12 +24,45 @@ pub(super) fn write_index(
     apis: &[Api],
     event_apis: &[EventApi],
 ) -> std::io::Result<()> {
-    let mut out = String::new();
-    out.push_str("// Generated by draad-codegen. Do not edit.\n\n");
-    out.push_str(RPC_RUNTIME_TS);
+    let mut w = Writer::new("\t");
 
+    w.line("// Generated by draad-codegen. Do not edit.");
+    w.blank();
+    w.raw(RPC_RUNTIME_TS);
+
+    inline_type_bindings(&mut w, types_in_order, per_type_dir);
+
+    for api in apis {
+        write_api_class(&mut w, api);
+    }
+    for ev in event_apis {
+        write_events_class(&mut w, ev);
+    }
+
+    write_aggregator(&mut w, apis, event_apis);
+
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let out = w.into_string();
+    // Skip the write if the file already matches — otherwise we'd bump
+    // its mtime on every build, which combined with the
+    // `cargo:rerun-if-changed=index.ts` directive emit_cargo_directives
+    // prints would trap the build script in an infinite re-run loop.
+    if let Ok(existing) = fs::read_to_string(out_path) {
+        if existing == out {
+            return Ok(());
+        }
+    }
+    fs::write(out_path, out)
+}
+
+/// Inline ts-rs's per-type bindings into the unified `index.ts`. Each
+/// type's file is dropped in verbatim (modulo import lines and the
+/// generated-by header), preceded by a separator blank line.
+fn inline_type_bindings(w: &mut Writer, types_in_order: &[String], per_type_dir: &Path) {
     for ty in types_in_order {
-        out.push('\n');
+        w.blank();
         let file = per_type_dir.join(format!("{ty}.ts"));
         let raw = fs::read_to_string(&file).unwrap_or_else(|_| {
             panic!(
@@ -166,163 +75,184 @@ pub(super) fn write_index(
             if trimmed.starts_with("import ") || trimmed.starts_with("// This file was generated") {
                 continue;
             }
-            out.push_str(&normalize_numbers(line));
-            out.push('\n');
+            // The per-type files already carry their own indentation;
+            // splice them in at column 0 rather than letting the Writer's
+            // indent level re-indent them.
+            w.raw(&normalize_numbers(line));
+            w.raw("\n");
         }
     }
-
-    for api in apis {
-        emit_sub_class(&mut out, api);
-    }
-    for ev in event_apis {
-        emit_events_class(&mut out, ev);
-    }
-
-    out.push('\n');
-    out.push_str("export class Api {\n");
-    for api in apis {
-        emit_jsdoc(&mut out, &api.docs, "\t");
-        out.push_str(&format!(
-            "\t{ns}: {cls};\n",
-            ns = api.namespace,
-            cls = api.class_name
-        ));
-    }
-    for ev in event_apis {
-        emit_jsdoc(&mut out, &ev.docs, "\t");
-        out.push_str(&format!(
-            "\t{ns}Events: {cls};\n",
-            ns = ev.namespace,
-            cls = ev.class_name
-        ));
-    }
-    out.push_str("\n\tconstructor(rpc: Rpc) {\n");
-    for api in apis {
-        out.push_str(&format!(
-            "\t\tthis.{ns} = new {cls}(rpc);\n",
-            ns = api.namespace,
-            cls = api.class_name
-        ));
-    }
-    for ev in event_apis {
-        out.push_str(&format!(
-            "\t\tthis.{ns}Events = new {cls}(rpc);\n",
-            ns = ev.namespace,
-            cls = ev.class_name
-        ));
-    }
-    out.push_str("\t}\n");
-    out.push_str("}\n");
-
-    if let Some(parent) = out_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(out_path, out)
 }
 
-fn emit_sub_class(out: &mut String, api: &Api) {
-    out.push('\n');
-    emit_jsdoc(out, &api.docs, "");
-    out.push_str(&format!("export class {} {{\n", api.class_name));
-    out.push_str("\tconstructor(private rpc: Rpc) {}\n");
+fn write_api_class(w: &mut Writer, api: &Api) {
+    w.blank();
+    write_jsdoc(w, &api.docs);
+    w.line(&format!("export class {} {{", api.class_name));
+    w.indented(|w| {
+        w.line("constructor(private rpc: Rpc) {}");
+        for m in &api.methods {
+            write_api_method(w, api, m);
+        }
+    });
+    w.line("}");
+}
 
-    for m in &api.methods {
-        let param_decl = m
+fn write_api_method(w: &mut Writer, api: &Api, m: &super::model::Method) {
+    let param_decl = m
+        .params
+        .iter()
+        .map(|p| format!("{}: {}", p.name, p.ts_type))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // POST is the implicit default so emit `call("ns/name", { args })`
+    // verbatim — keeps existing generated TS byte-identical. For other
+    // verbs we always pass an args object (even `{}`) so the verb sits
+    // in the third slot.
+    let args_obj = if m.params.is_empty() {
+        "{}".to_string()
+    } else {
+        let names = m
             .params
             .iter()
-            .map(|p| format!("{}: {}", p.name, p.ts_type))
+            .map(|p| p.name.clone())
             .collect::<Vec<_>>()
             .join(", ");
-
-        let call_args = if m.params.is_empty() {
+        format!("{{ {names} }}")
+    };
+    let call_tail = if m.verb == Verb::Post {
+        if m.params.is_empty() {
             String::new()
         } else {
-            let names = m
-                .params
-                .iter()
-                .map(|p| p.name.clone())
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(", {{ {names} }}")
-        };
+            format!(", {args_obj}")
+        }
+    } else {
+        format!(", {args_obj}, \"{verb}\"", verb = m.verb.ts_label())
+    };
 
-        out.push('\n');
-        emit_method_jsdoc(out, &m.docs, &m.params, "\t");
-        out.push_str(&format!(
-            "\t{name}({decl}): Promise<{ret}> {{\n",
-            name = m.ts_name,
-            decl = param_decl,
-            ret = m.ret_ts,
-        ));
-        out.push_str(&format!(
-            "\t\treturn this.rpc.call(\"{ns}/{name}\"{call_args});\n",
+    w.blank();
+    write_method_jsdoc(w, &m.docs, &m.params);
+    w.line(&format!(
+        "{name}({decl}): Promise<{ret}> {{",
+        name = m.ts_name,
+        decl = param_decl,
+        ret = m.ret_ts,
+    ));
+    w.indented(|w| {
+        w.line(&format!(
+            "return this.rpc.call(\"{ns}/{name}\"{call_tail});",
             ns = api.namespace,
             name = m.rust_name,
         ));
-        out.push_str("\t}\n");
-    }
-    out.push_str("}\n");
+    });
+    w.line("}");
 }
 
-fn emit_events_class(out: &mut String, ev: &EventApi) {
-    out.push('\n');
-    emit_jsdoc(out, &ev.docs, "");
-    out.push_str(&format!("export class {} {{\n", ev.class_name));
-    out.push_str("\tconstructor(private rpc: Rpc) {}\n");
-
-    for e in &ev.events {
-        out.push('\n');
-        emit_jsdoc(out, &e.docs, "\t");
-        out.push_str(&format!(
-            "\ton{cap}(handler: (payload: {pl}) => void): UnlistenFn {{\n",
-            cap = capitalize(&e.ts_name),
-            pl = e.payload_ts,
-        ));
-        out.push_str(&format!(
-            "\t\treturn this.rpc.listen<{pl}>(\"{wire}\", handler);\n",
-            pl = e.payload_ts,
-            wire = e.wire,
-        ));
-        out.push_str("\t}\n");
-    }
-    out.push_str("}\n");
+fn write_events_class(w: &mut Writer, ev: &EventApi) {
+    w.blank();
+    write_jsdoc(w, &ev.docs);
+    w.line(&format!("export class {} {{", ev.class_name));
+    w.indented(|w| {
+        w.line("constructor(private rpc: Rpc) {}");
+        for e in &ev.events {
+            w.blank();
+            write_jsdoc(w, &e.docs);
+            w.line(&format!(
+                "on{cap}(handler: (payload: {pl}) => void): UnlistenFn {{",
+                cap = capitalize(&e.ts_name),
+                pl = e.payload_ts,
+            ));
+            w.indented(|w| {
+                w.line(&format!(
+                    "return this.rpc.listen<{pl}>(\"{wire}\", handler);",
+                    pl = e.payload_ts,
+                    wire = e.wire,
+                ));
+            });
+            w.line("}");
+        }
+    });
+    w.line("}");
 }
 
-fn emit_jsdoc(out: &mut String, docs: &[String], indent: &str) {
+fn write_aggregator(w: &mut Writer, apis: &[Api], event_apis: &[EventApi]) {
+    w.blank();
+    w.line("export class Api {");
+    w.indented(|w| {
+        for api in apis {
+            write_jsdoc(w, &api.docs);
+            w.line(&format!(
+                "{ns}: {cls};",
+                ns = api.namespace,
+                cls = api.class_name
+            ));
+        }
+        for ev in event_apis {
+            write_jsdoc(w, &ev.docs);
+            w.line(&format!(
+                "{ns}Events: {cls};",
+                ns = ev.namespace,
+                cls = ev.class_name
+            ));
+        }
+        w.blank();
+        w.line("constructor(rpc: Rpc) {");
+        w.indented(|w| {
+            for api in apis {
+                w.line(&format!(
+                    "this.{ns} = new {cls}(rpc);",
+                    ns = api.namespace,
+                    cls = api.class_name
+                ));
+            }
+            for ev in event_apis {
+                w.line(&format!(
+                    "this.{ns}Events = new {cls}(rpc);",
+                    ns = ev.namespace,
+                    cls = ev.class_name
+                ));
+            }
+        });
+        w.line("}");
+    });
+    w.line("}");
+}
+
+fn write_jsdoc(w: &mut Writer, docs: &[String]) {
     if docs.is_empty() {
         return;
     }
     if docs.len() == 1 {
-        out.push_str(&format!("{indent}/** {} */\n", docs[0]));
+        w.line(&format!("/** {} */", docs[0]));
         return;
     }
-    out.push_str(&format!("{indent}/**\n"));
+    w.line("/**");
     for line in docs {
-        out.push_str(&format!("{indent} * {line}\n"));
+        w.line(&format!(" * {line}"));
     }
-    out.push_str(&format!("{indent} */\n"));
+    w.line(" */");
 }
 
-fn emit_method_jsdoc(out: &mut String, method_docs: &[String], params: &[Param], indent: &str) {
+fn write_method_jsdoc(w: &mut Writer, method_docs: &[String], params: &[Param]) {
     let has_method = !method_docs.is_empty();
     let has_params = params.iter().any(|p| !p.docs.is_empty());
     if !has_method && !has_params {
         return;
     }
     if has_method && !has_params && method_docs.len() == 1 {
-        out.push_str(&format!("{indent}/** {} */\n", method_docs[0]));
+        w.line(&format!("/** {} */", method_docs[0]));
         return;
     }
-    out.push_str(&format!("{indent}/**\n"));
+    w.line("/**");
     for line in method_docs {
-        out.push_str(&format!("{indent} * {line}\n"));
+        w.line(&format!(" * {line}"));
     }
     for p in params {
         if p.docs.is_empty() {
             continue;
         }
         let summary = p.docs.join(" ");
-        out.push_str(&format!("{indent} * @param {} - {summary}\n", p.name));
+        w.line(&format!(" * @param {} - {summary}", p.name));
     }
-    out.push_str(&format!("{indent} */\n"));
+    w.line(" */");
 }
