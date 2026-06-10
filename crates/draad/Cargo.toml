@@ -13,11 +13,11 @@ description = "Trait-driven RPC schema for Rust↔TypeScript. One trait → Axum
 runtime = ["dep:axum", "dep:serde", "dep:serde_json", "dep:tokio"]
 
 [dependencies]
-draad-macros = { path = "../draad-macros", version = "0.1.1" }
+draad-macros = { path = "../draad-macros", version = "0.2.0" }
 # Re-exported for users who want to drive the codegen from a custom
 # `build.rs` instead of the macro path. Pulled transitively by the
 # `include_generated!` proc-macro regardless.
-draad-codegen = { path = "../draad-codegen", version = "0.1.1" }
+draad-codegen = { path = "../draad-codegen", version = "0.2.0" }
 
 # Runtime-only, opt in via the `runtime` feature.
 axum = { version = "0.8", optional = true, features = ["ws"] }

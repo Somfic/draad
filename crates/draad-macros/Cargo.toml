@@ -13,4 +13,4 @@ proc-macro = true
 syn = { version = "2", features = ["full", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"
-draad-codegen = { path = "../draad-codegen", version = "0.1.0" }
+draad-codegen = { path = "../draad-codegen", version = "0.2.0" }
