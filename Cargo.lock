@@ -156,7 +156,7 @@ dependencies = [
 
 [[package]]
 name = "draad"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "draad-macros",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "draad-macros"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -250,7 +250,7 @@ dependencies = [
 
 [[package]]
 name = "hello"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "axum",
