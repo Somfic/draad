@@ -40,9 +40,10 @@ mod model;
 mod parse;
 mod pipeline;
 mod scan;
+mod ty_decl;
 mod types;
 mod util;
 mod writer;
 
 pub use config::Config;
-pub use pipeline::generate;
+pub use pipeline::{generate, run, Artifacts};

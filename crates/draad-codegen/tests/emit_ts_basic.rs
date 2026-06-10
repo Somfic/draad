@@ -4,8 +4,6 @@
 //! runtime (Rpc/UnlistenFn/RpcError), the namespace class, and the Api
 //! aggregator.
 
-#![cfg(feature = "codegen")]
-
 mod common;
 
 #[test]
@@ -26,10 +24,9 @@ pub trait SearchApi {
     .unwrap();
 
     let client_dir = root.join("frontend");
-    draad::codegen::Config::new()
+    draad_codegen::Config::new()
         .root(&root)
         .client_dir(&client_dir)
-        .rpc_runtime("draad::runtime::{Response, ok}")
         .generate()
         .unwrap();
 
@@ -45,7 +42,7 @@ pub trait SearchApi {
         "missing UnlistenFn:\n{index}"
     );
     assert!(
-        index.contains("export class RpcError extends Error"),
+        index.contains("export class RpcError<E = unknown> extends Error"),
         "missing RpcError:\n{index}"
     );
     assert!(
@@ -71,8 +68,12 @@ pub trait SearchApi {
         "missing this.rpc.call() dispatch:\n{index}"
     );
     assert!(
-        index.contains("/** Full-text search. */"),
+        index.contains(" * Full-text search."),
         "missing method jsdoc:\n{index}"
+    );
+    assert!(
+        index.contains(" * @throws {RpcError<MyError>}"),
+        "missing @throws jsdoc derived from Result<_, MyError>:\n{index}"
     );
 
     // Aggregator
@@ -81,8 +82,12 @@ pub trait SearchApi {
         "missing Api class:\n{index}"
     );
     assert!(
-        index.contains("constructor(rpc: Rpc)"),
-        "missing Api(rpc) ctor:\n{index}"
+        index.contains("constructor(private rpc: Rpc)"),
+        "missing Api(rpc) ctor (now stores rpc to forward onError):\n{index}"
+    );
+    assert!(
+        index.contains("onError(handler: (err: RpcError) => void): UnlistenFn {"),
+        "missing Api.onError forwarder:\n{index}"
     );
     assert!(
         index.contains("this.search = new SearchApi(rpc);"),

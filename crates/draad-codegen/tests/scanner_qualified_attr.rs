@@ -1,5 +1,3 @@
-#![cfg(feature = "codegen")]
-
 mod common;
 
 #[test]

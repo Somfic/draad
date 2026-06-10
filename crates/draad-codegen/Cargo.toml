@@ -1,0 +1,12 @@
+[package]
+name = "draad-codegen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Code generator for the draad RPC schema. Drives the scan → parse → emit pipeline that `draad-macros::include_generated!` invokes; also usable directly from a `build.rs` via [`Config::generate`]."
+
+[dependencies]
+syn = { version = "2", features = ["full", "extra-traits", "parsing"] }
+quote = "1"
+proc-macro2 = "1"

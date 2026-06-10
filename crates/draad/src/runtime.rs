@@ -4,45 +4,20 @@
 //! Wire format (matches the TypeScript `defaultRpc` shipped in the
 //! generated `index.ts`):
 //!
-//!  - Calls: HTTP 200 + JSON body on success; HTTP 500 + plain-text body
-//!    on failure.
-//!  - Events: WS frames shaped `{ topic: string, payload: T }`, broadcast
-//!    to every connected client.
-//!
-//! If you need a different shape (richer errors, per-client filtering,
-//! ack/replay), write your own `Response` / `EventBus` / WS handler and
-//! point the codegen at them.
+//!  - Calls: HTTP 200 + JSON body on success. On failure, the user's
+//!    error type drives the status and body via its
+//!    [`axum::response::IntoResponse`] impl — typically a JSON body
+//!    plus a meaningful status code. The generated handler signature
+//!    is `Result<Json<Ok>, Err>`, so axum's blanket
+//!    `IntoResponse for Result<R, E>` handles dispatch.
+//!  - Events: WS frames shaped `{ topic: string, payload: T }`,
+//!    broadcast to every connected client.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response as AxumResponse};
-use axum::Json;
+use axum::response::Response as AxumResponse;
 use serde::Serialize;
 use tokio::sync::broadcast;
-
-// ──────────────────────────────────────────────────────────────────────
-// RPC response shim
-// ──────────────────────────────────────────────────────────────────────
-
-/// What every generated handler returns. `Ok(T)` → JSON 200; `Err(msg)` →
-/// plain-text 500.
-pub struct Response<T>(pub Result<T, String>);
-
-/// Lifts a `Result<T, E: Display>` into [`Response<T>`]. The codegen
-/// emits a call to this for trait methods whose return type is `Result`.
-pub fn ok<T, E: std::fmt::Display>(r: Result<T, E>) -> Response<T> {
-    Response(r.map_err(|e| e.to_string()))
-}
-
-impl<T: Serialize> IntoResponse for Response<T> {
-    fn into_response(self) -> AxumResponse {
-        match self.0 {
-            Ok(value) => (StatusCode::OK, Json(value)).into_response(),
-            Err(message) => (StatusCode::INTERNAL_SERVER_ERROR, message).into_response(),
-        }
-    }
-}
 
 // ──────────────────────────────────────────────────────────────────────
 // Event bus + WebSocket handler

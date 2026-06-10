@@ -159,19 +159,27 @@ name = "draad"
 version = "0.1.1"
 dependencies = [
  "axum",
+ "draad-codegen",
  "draad-macros",
- "proc-macro2",
- "quote",
  "serde",
  "serde_json",
- "syn",
  "tokio",
+]
+
+[[package]]
+name = "draad-codegen"
+version = "0.1.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
 name = "draad-macros"
 version = "0.1.1"
 dependencies = [
+ "draad-codegen",
  "proc-macro2",
  "quote",
  "syn",

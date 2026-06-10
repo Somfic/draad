@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/draad",
+    "crates/draad-codegen",
     "crates/draad-macros",
     "examples/hello",
 ]

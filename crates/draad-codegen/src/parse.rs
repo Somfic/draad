@@ -9,7 +9,10 @@ use syn::{FnArg, ItemTrait, Pat, ReturnType, TraitItem, Type};
 
 use super::model::{Api, Event, EventApi, Method, Param, Verb};
 use super::scan::{attr_path_matches, extract_docs};
-use super::types::{extract_result_inner_ts, is_query_safe, rust_type_to_string, rust_type_to_ts};
+use super::types::{
+    extract_result_err_ts, extract_result_inner_ts, is_query_safe, rust_type_to_string,
+    rust_type_to_ts,
+};
 use super::util::snake_to_camel;
 
 pub(super) fn parse_trait(
@@ -29,7 +32,13 @@ pub(super) fn parse_trait(
         let docs = extract_docs(&method.attrs);
         let verb = parse_verb(&method.attrs, &rust_name);
         let params = parse_params(&method.sig.inputs, &method.sig.ident, imports);
-        let (ret_ts, ret_rust, returns_result) = parse_return(&method.sig.output, imports);
+        let Return {
+            ret_ts,
+            ret_rust,
+            returns_result,
+            err_rust,
+            err_ts,
+        } = parse_return(&method.sig.output, imports);
 
         if !verb.has_body() {
             for p in &params {
@@ -54,6 +63,8 @@ pub(super) fn parse_trait(
             ret_ts,
             ret_rust,
             returns_result,
+            err_rust,
+            err_ts,
             docs,
             verb,
         });
@@ -127,20 +138,43 @@ fn parse_params(
     params
 }
 
-fn parse_return(output: &ReturnType, imports: &mut BTreeSet<String>) -> (String, String, bool) {
-    match output {
-        ReturnType::Type(_, ty) => {
-            let returns_result = matches!(ty.as_ref(), Type::Path(p) if {
-                let seg = p.path.segments.last().unwrap();
-                seg.ident == "Result" || seg.ident == "RpcResult"
-            });
-            (
-                extract_result_inner_ts(ty, imports),
-                rust_type_to_string(ty),
-                returns_result,
-            )
-        }
-        ReturnType::Default => ("void".into(), "()".into(), false),
+struct Return {
+    ret_ts: String,
+    ret_rust: String,
+    returns_result: bool,
+    err_rust: Option<String>,
+    err_ts: Option<String>,
+}
+
+fn parse_return(output: &ReturnType, imports: &mut BTreeSet<String>) -> Return {
+    let ReturnType::Type(_, ty) = output else {
+        return Return {
+            ret_ts: "void".into(),
+            ret_rust: "()".into(),
+            returns_result: false,
+            err_rust: None,
+            err_ts: None,
+        };
+    };
+    let returns_result = matches!(ty.as_ref(), Type::Path(p) if {
+        let seg = p.path.segments.last().unwrap();
+        seg.ident == "Result" || seg.ident == "RpcResult"
+    });
+    let ret_rust = rust_type_to_string(ty);
+    let ret_ts = extract_result_inner_ts(ty, imports);
+    let (err_rust, err_ts) = if returns_result {
+        let err_ts = extract_result_err_ts(ty, imports);
+        let err_rust = super::types::result_err_type(&ret_rust);
+        (err_rust, err_ts)
+    } else {
+        (None, None)
+    };
+    Return {
+        ret_ts,
+        ret_rust,
+        returns_result,
+        err_rust,
+        err_ts,
     }
 }
 

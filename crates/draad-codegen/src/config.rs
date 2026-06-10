@@ -17,12 +17,6 @@ pub struct Config {
     /// Default: `frontend/src/lib/schema`.
     pub client_dir: PathBuf,
 
-    /// `use` statement (without the `use` keyword or trailing `;`) for the
-    /// RPC response wrapper. The generated handlers call `ok(...)` and
-    /// return `Response<T>`. Default points at the shim shipped under the
-    /// `runtime` feature; override to plug in a custom wrapper.
-    /// Default: `draad::runtime::{Response, ok}`.
-    pub rpc_runtime_use: String,
     /// Module path prefix for discovered API modules. The codegen emits
     /// one `use {prefix}::{module}::*;` per scanned `.rs` file that holds
     /// `#[api]` / `#[events]` / `#[ty]` items. Default: `crate::api`.
@@ -45,7 +39,6 @@ impl Default for Config {
             src_dir: PathBuf::from("src"),
             generated_rs: PathBuf::from("src/_generated.rs"),
             client_dir: PathBuf::from("frontend/src/lib/schema"),
-            rpc_runtime_use: "draad::runtime::{Response, ok}".into(),
             api_modules_prefix: "crate::api".into(),
             skip_files: vec!["lib".into(), "main".into(), "mod".into()],
             rust_only: false,
@@ -72,10 +65,6 @@ impl Config {
     }
     pub fn client_dir(mut self, p: impl Into<PathBuf>) -> Self {
         self.client_dir = p.into();
-        self
-    }
-    pub fn rpc_runtime(mut self, s: impl Into<String>) -> Self {
-        self.rpc_runtime_use = s.into();
         self
     }
     pub fn api_modules_prefix(mut self, s: impl Into<String>) -> Self {

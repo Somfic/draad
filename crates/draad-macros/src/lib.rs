@@ -45,28 +45,15 @@ use syn::{
     Token,
 };
 
-/// Derives the standard set of traits for any type that crosses the
-/// frontend/backend boundary: serde for the wire, ts-rs for the TypeScript
-/// counterpart. Per-type ts-rs bindings land in the consumer crate's
-/// `target/draad-bindings/_per_type/` — the absolute path is baked into
-/// the emitted `#[ts(export_to = ...)]` at macro expansion time, so
-/// callers don't need to set `TS_RS_EXPORT_DIR` or any other env var.
+/// Derives serde + the small set of standard traits on a wire type. The
+/// TypeScript counterpart is generated separately by the codegen — it
+/// parses this very item out of the source file and renders the TS
+/// declaration directly, no ts-rs / runtime export step required.
 #[proc_macro_attribute]
 pub fn ty(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
-    // CARGO_MANIFEST_DIR is set by cargo on every rustc invocation to
-    // the path of the crate currently being compiled — i.e. the
-    // consumer's package dir during proc-macro expansion. Falling back
-    // to a relative path keeps the macro usable in odd contexts where
-    // the var isn't set (e.g. rust-analyzer in some configurations);
-    // ts-rs will resolve it against its own default base then.
-    let export_to = match std::env::var("CARGO_MANIFEST_DIR") {
-        Ok(dir) => format!("{dir}/target/draad-bindings/_per_type/"),
-        Err(_) => "_per_type/".to_string(),
-    };
     quote! {
-        #[derive(Debug, Clone, ::serde::Serialize, ::serde::Deserialize, ::ts_rs::TS)]
-        #[ts(export, export_to = #export_to)]
+        #[derive(Debug, Clone, ::serde::Serialize, ::serde::Deserialize)]
         #input
     }
     .into()
@@ -176,3 +163,134 @@ pub fn events(attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::new()
 }
 
+/// Drive the whole codegen pipeline at macro-expansion time.
+///
+/// ```ignore
+/// draad::include_generated!(AppContext, EventBus);
+/// ```
+///
+/// Walks the consumer crate's `src/`, runs scan/parse/emit, splices the
+/// resulting handler tree + router into the call site, and writes the
+/// TypeScript client to `frontend/src/lib/schema/index.ts` as a side
+/// effect. No `build.rs`, no `cargo test` step.
+///
+/// `include_bytes!` invalidation guards are emitted for every scanned
+/// file so rustc re-expands when sources change.
+#[proc_macro]
+pub fn include_generated(input: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(input as IncludeGeneratedArgs);
+    expand_include_generated(args).unwrap_or_else(|e| e.to_compile_error().into())
+}
+
+struct IncludeGeneratedArgs {
+    state: syn::Type,
+    bus: Option<syn::Type>,
+}
+
+impl syn::parse::Parse for IncludeGeneratedArgs {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let state: syn::Type = input.parse()?;
+        let bus = if input.peek(Token![,]) {
+            let _: Token![,] = input.parse()?;
+            if input.is_empty() {
+                None
+            } else {
+                Some(input.parse()?)
+            }
+        } else {
+            None
+        };
+        Ok(IncludeGeneratedArgs { state, bus })
+    }
+}
+
+fn expand_include_generated(args: IncludeGeneratedArgs) -> syn::Result<TokenStream> {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").map_err(|_| {
+        syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "CARGO_MANIFEST_DIR not set; `include_generated!` must run under cargo",
+        )
+    })?;
+
+    let cfg = draad_codegen::Config::new().root(&manifest_dir);
+    let artifacts = draad_codegen::run(&cfg).map_err(|e| {
+        syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("draad codegen failed: {e}"),
+        )
+    })?;
+
+    if let Some(ts) = &artifacts.ts_source {
+        write_if_changed(&artifacts.ts_path, ts).map_err(|e| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "draad: failed to write {}: {e}",
+                    artifacts.ts_path.display()
+                ),
+            )
+        })?;
+    }
+
+    let rust = syn::parse_str::<proc_macro2::TokenStream>(&artifacts.rust_source).map_err(|e| {
+        syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("draad codegen produced invalid Rust: {e}"),
+        )
+    })?;
+
+    let state = &args.state;
+    let bus = args.bus.unwrap_or_else(|| syn::parse_quote!(()));
+
+    // Tell rustc which source files this macro read so the cached
+    // expansion gets invalidated when any of them change. We
+    // deliberately do *not* include the generated TS output here — its
+    // mtime is updated on every run, which would trap incremental
+    // compilation in a re-run loop.
+    let guards: Vec<proc_macro2::TokenStream> = artifacts
+        .files_read
+        .iter()
+        .map(|p| {
+            let s = p.to_string_lossy().into_owned();
+            quote! { const _: &[u8] = include_bytes!(#s); }
+        })
+        .collect();
+
+    let expanded = quote! {
+        #[allow(
+            non_camel_case_types,
+            dead_code,
+            unused_imports,
+            clippy::needless_lifetimes,
+        )]
+        mod __draad_generated {
+            // Bind the consumer's state/bus types to the internal names
+            // the generated code references. The aliases stay inside the
+            // module so they don't pollute the caller's namespace.
+            pub(super) type __DraadState = #state;
+            pub(super) type __DraadBus = #bus;
+            #rust
+        }
+        pub use __draad_generated::*;
+
+        // Tell rustc which files this macro depended on so the cached
+        // expansion is invalidated when any of them change. The
+        // surrounding `const _` discards the bytes — we only need the
+        // tracking side effect.
+        #(#guards)*
+    };
+
+    Ok(expanded.into())
+}
+
+fn write_if_changed(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Ok(existing) = std::fs::read_to_string(path) {
+        if existing == content {
+            return Ok(());
+        }
+    }
+    std::fs::write(path, content)
+}

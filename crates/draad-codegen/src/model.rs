@@ -14,9 +14,23 @@ pub(super) struct Method {
     /// Wire route segment: `{namespace}_{rust_name}`.
     pub command: String,
     pub params: Vec<Param>,
+    /// TS form of the Ok-side return type. `"void"` for unit / no return.
     pub ret_ts: String,
+    /// Rust form of the *full* return type as the user wrote it
+    /// (e.g. `Result < Vec < Hit > , MyError >`). For `Result` returns
+    /// the [`Method::returns_result`] flag is set and the emitter pulls
+    /// the Ok side out via [`super::types::result_ok_type`].
     pub ret_rust: String,
     pub returns_result: bool,
+    /// Rust form of the Err side when `returns_result` is true,
+    /// otherwise `None`. Used by the rust emitter to declare the
+    /// handler's `Result<Json<Ok>, Err>` return type — `Err` must
+    /// implement `axum::response::IntoResponse`.
+    pub err_rust: Option<String>,
+    /// TS form of the same. Surfaces in `@throws {RpcError<…>}` jsdoc
+    /// on the generated client method. `None` when the return is not a
+    /// `Result`.
+    pub err_ts: Option<String>,
     pub docs: Vec<String>,
     pub verb: Verb,
 }

@@ -70,7 +70,7 @@ pub(super) fn rust_type_to_string(ty: &Type) -> String {
     out
 }
 
-/// Map the *inner* type of a `Result<T, _>` return to TS. For non-Result
+/// Map the *Ok* half of a `Result<T, _>` return to TS. For non-Result
 /// returns this is equivalent to [`rust_type_to_ts`] on the whole type.
 pub(super) fn extract_result_inner_ts(ty: &Type, imports: &mut BTreeSet<String>) -> String {
     if let Type::Path(p) = ty {
@@ -84,25 +84,61 @@ pub(super) fn extract_result_inner_ts(ty: &Type, imports: &mut BTreeSet<String>)
     rust_type_to_ts(ty, imports)
 }
 
+/// Map the *Err* half of a `Result<_, E>` return to TS. Returns `None`
+/// for non-`Result` returns or unrecognised shapes.
+pub(super) fn extract_result_err_ts(ty: &Type, imports: &mut BTreeSet<String>) -> Option<String> {
+    let Type::Path(p) = ty else { return None };
+    let seg = p.path.segments.last()?;
+    if seg.ident != "Result" && seg.ident != "RpcResult" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    args.args
+        .iter()
+        .filter_map(|a| match a {
+            GenericArgument::Type(t) => Some(t),
+            _ => None,
+        })
+        .nth(1)
+        .map(|t| rust_type_to_ts(t, imports))
+}
+
 /// Given the stringified return type of a method (already normalised by
 /// [`rust_type_to_string`]), pull out the `Ok` half of a `Result<Ok, _>`
-/// so the generated handler can declare `Response<Ok>`. Non-result
+/// so the generated handler can wrap it in `Json<Ok>`. Non-result
 /// returns pass through unchanged.
 pub(super) fn result_ok_type(returns_result: bool, ret_rust: &str) -> String {
     if !returns_result {
         return ret_rust.to_string();
     }
-    match syn::parse_str::<Type>(ret_rust) {
-        Ok(Type::Path(p)) => {
-            let seg = p.path.segments.last().unwrap();
-            if let Some(inner) = first_generic(&seg.arguments) {
-                rust_type_to_string(inner)
-            } else {
-                "()".into()
-            }
-        }
-        _ => "()".into(),
-    }
+    result_generic_arg(ret_rust, 0).unwrap_or_else(|| "()".into())
+}
+
+/// Pull out the `Err` half of `Result<_, Err>`. Returns `None` for non-
+/// `Result` returns (or malformed ones — defensive, shouldn't happen).
+pub(super) fn result_err_type(ret_rust: &str) -> Option<String> {
+    result_generic_arg(ret_rust, 1)
+}
+
+/// Helper: parse `ret_rust` as a `Result<A, B>`-shaped type and return
+/// the Nth generic argument re-rendered via [`rust_type_to_string`].
+fn result_generic_arg(ret_rust: &str, index: usize) -> Option<String> {
+    let ty = syn::parse_str::<Type>(ret_rust).ok()?;
+    let Type::Path(p) = ty else { return None };
+    let seg = p.path.segments.last()?;
+    let PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    args.args
+        .iter()
+        .filter_map(|a| match a {
+            GenericArgument::Type(t) => Some(t),
+            _ => None,
+        })
+        .nth(index)
+        .map(rust_type_to_string)
 }
 
 pub(super) fn first_generic(args: &PathArguments) -> Option<&Type> {

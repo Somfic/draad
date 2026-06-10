@@ -19,11 +19,37 @@ export interface Rpc {
 
 	/** Subscribe to a backend event. Returns an unsubscribe handle. */
 	listen<T>(topic: string, handler: (payload: T) => void): UnlistenFn;
+
+	/**
+	 * Subscribe to every failed RPC call. The handler fires *before* the
+	 * promise rejects, so local `try { ... } catch (e)` paths still see
+	 * the error too. Useful for global concerns: toast on error, route
+	 * 401s to a sign-in flow, ship a Sentry breadcrumb, etc. Optional on
+	 * the interface — custom transports can omit it.
+	 */
+	onError?(handler: (err: RpcError) => void): UnlistenFn;
 }
 
-/** Thrown (or returned) by `Rpc.call` implementations on failure. */
-export class RpcError extends Error {
-	constructor(public readonly code: string, message: string) {
+/**
+ * Thrown (or returned) by `Rpc.call` implementations on failure.
+ *
+ * The generic `E` is the shape of the server's error body — generated
+ * methods tag their `@throws` with the concrete error type pulled from
+ * the trait's `Result<_, E>` return.
+ */
+export class RpcError<E = unknown> extends Error {
+	constructor(
+		public readonly code: string,
+		/** HTTP status code from the response (or 0 if the request never reached the server). */
+		public readonly status: number,
+		/**
+		 * Parsed JSON body from the server, when present. Falls back to
+		 * the raw response text on non-JSON responses, and to `null`
+		 * when the body was empty.
+		 */
+		public readonly body: E | string | null,
+		message: string,
+	) {
 		super(message);
 		this.name = "RpcError";
 	}
@@ -60,9 +86,19 @@ export function defaultRpc(opts: DefaultRpcOptions = {}): Rpc {
 	const maxDelayMs = opts.maxReconnectDelayMs ?? 30000;
 	const shouldReconnect = opts.reconnect !== false;
 	const subs = new Map<string, Set<(payload: unknown) => void>>();
+	const errorHandlers = new Set<(err: RpcError) => void>();
 	let ws: WebSocket | undefined;
 	let reconnectDelayMs = 500;
 	let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+
+	function fireError(err: RpcError): RpcError {
+		// Notify every observer; a single throwing handler must not
+		// take out the others, hence the per-handler try/catch.
+		for (const h of errorHandlers) {
+			try { h(err); } catch { /* swallow handler errors */ }
+		}
+		return err;
+	}
 
 	function openWs(url: string): WebSocket {
 		const sock = new WebSocket(url);
@@ -91,7 +127,7 @@ export function defaultRpc(opts: DefaultRpcOptions = {}): Rpc {
 
 	function ensureWs(): WebSocket {
 		if (!opts.wsUrl) {
-			throw new RpcError("NO_WS_URL", "defaultRpc: wsUrl not configured; cannot listen()");
+			throw new RpcError("NO_WS_URL", 0, null, "defaultRpc: wsUrl not configured; cannot listen()");
 		}
 		if (ws && ws.readyState !== WebSocket.CLOSED) return ws;
 		ws = openWs(opts.wsUrl);
@@ -119,11 +155,39 @@ export function defaultRpc(opts: DefaultRpcOptions = {}): Rpc {
 				const qs = params.toString();
 				if (qs) url += `?${qs}`;
 			}
-			const res = await fetch(url, init);
-			if (!res.ok) {
-				throw new RpcError(`HTTP_${res.status}`, await res.text());
+			// Every failure path constructs an `RpcError`, fires the
+			// global `onError` observers, then throws — so callers'
+			// local try/catch and global handlers both see it.
+			let res: Response;
+			try {
+				res = await fetch(url, init);
+			} catch (e) {
+				const msg = e instanceof Error ? e.message : String(e);
+				throw fireError(new RpcError("NETWORK", 0, null, msg));
 			}
-			return (await res.json()) as T;
+			if (!res.ok) {
+				// Best effort at giving callers the typed body their
+				// `@throws` jsdoc promised: read once as text, try
+				// JSON.parse, fall back to the raw string. Empty body
+				// becomes null so `instanceof` checks stay clean.
+				const raw = await res.text();
+				let body: unknown = null;
+				if (raw.length > 0) {
+					try {
+						body = JSON.parse(raw);
+					} catch {
+						body = raw;
+					}
+				}
+				const message = typeof body === "string" ? body : res.statusText;
+				throw fireError(new RpcError(`HTTP_${res.status}`, res.status, body as never, message));
+			}
+			try {
+				return (await res.json()) as T;
+			} catch (e) {
+				const msg = e instanceof Error ? e.message : String(e);
+				throw fireError(new RpcError("BAD_BODY", res.status, null, msg));
+			}
 		},
 		listen<T>(topic: string, handler: (payload: T) => void): UnlistenFn {
 			ensureWs();
@@ -142,6 +206,10 @@ export function defaultRpc(opts: DefaultRpcOptions = {}): Rpc {
 					reconnectTimer = undefined;
 				}
 			};
+		},
+		onError(handler: (err: RpcError) => void): UnlistenFn {
+			errorHandlers.add(handler);
+			return () => { errorHandlers.delete(handler); };
 		},
 	};
 }

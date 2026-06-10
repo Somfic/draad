@@ -1,4 +1,3 @@
-#![cfg(feature = "codegen")]
 // Per integration test file, Cargo compiles `common` separately; not
 // every test uses every helper, so dead-code lints can fire.
 #![allow(dead_code)]
@@ -14,9 +13,8 @@ pub fn fresh_root(name: &str) -> PathBuf {
 }
 
 pub fn run(root: &PathBuf) -> String {
-    draad::codegen::Config::new()
+    draad_codegen::Config::new()
         .root(root)
-        .rpc_runtime("draad::runtime::{Response, ok}")
         .rust_only()
         .generate()
         .unwrap();

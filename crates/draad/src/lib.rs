@@ -1,27 +1,17 @@
 //! Trait-driven RPC schema for Rust↔TypeScript.
 //!
 //! Define your API as Rust traits annotated with [`api`] / [`events`] /
-//! [`ty`]; the codegen (under the `codegen` feature) reads the source and
-//! emits the matching Axum router plus a typed TypeScript client.
-//!
-//! See the crate README for a complete walkthrough.
-//!
-//! ## Setup
-//!
-//! ```toml
-//! # runtime, just the proc-macros
-//! [dependencies]
-//! draad = "0.1"
-//!
-//! # build.rs, codegen module
-//! [build-dependencies]
-//! draad = { version = "0.1", features = ["codegen"] }
-//! ```
+//! [`ty`]; the codegen reads the source and emits the matching Axum
+//! router plus a typed TypeScript client. Drop a single
+//! `draad::include_generated!(AppContext, EventBus);` line at module
+//! scope (typically in `main.rs`) — no `build.rs`, no `cargo test`
+//! step, all wiring happens during proc-macro expansion on `cargo
+//! build`.
 //!
 //! ## Example
 //!
 //! ```ignore
-//! use draad::{api, ty};
+//! use draad::{api, ty, runtime::EventBus};
 //!
 //! #[ty]
 //! pub struct Hit { pub id: i64, pub title: String }
@@ -30,67 +20,22 @@
 //! pub trait SearchApi {
 //!     async fn query(&self, q: String) -> Result<Vec<Hit>, MyError>;
 //! }
+//!
+//! #[derive(Clone)]
+//! pub struct AppContext { /* ... */ }
+//!
+//! draad::include_generated!(AppContext, EventBus);
 //! ```
 
-pub use draad_macros::{api, events, ty};
+pub use draad_macros::{api, events, include_generated, ty};
 
-/// Includes the Rust file emitted by [`codegen`] from your `build.rs`.
-///
-/// Expand once at module scope (typically in `lib.rs` or `main.rs`) and the
-/// generated `rpc_router()`, request DTOs, axum handlers, and `Events`
-/// emitter tree become part of your crate. Equivalent to writing
-/// `include!(concat!(env!("OUT_DIR"), "/_generated.rs"));` by hand.
-///
-/// Your `build.rs` must write the generated file to `OUT_DIR`:
-///
-/// ```ignore
-/// // build.rs
-/// let out = std::env::var("OUT_DIR").unwrap();
-/// draad::codegen::Config::new()
-///     .generated_rs(format!("{out}/_generated.rs"))
-///     // ...rest of config...
-///     .generate()
-///     .unwrap();
-/// ```
-///
-/// ```ignore
-/// // src/lib.rs
-/// draad::include_generated!();
-/// ```
-#[macro_export]
-macro_rules! include_generated {
-    ($state:ty $(,)?) => {
-        $crate::include_generated!($state, ());
-    };
-    ($state:ty, $bus:ty $(,)?) => {
-        #[allow(
-            non_camel_case_types,
-            dead_code,
-            unused_imports,
-            clippy::needless_lifetimes
-        )]
-        mod __draad_generated {
-            // The generated file references `__DraadState` / `__DraadBus`;
-            // these aliases bind them to the consumer's types without
-            // requiring those types to live at any particular module
-            // path. Distinctive names sidestep recursive-alias issues
-            // when the caller's type also happens to be `AppContext`.
-            pub(super) type __DraadState = $state;
-            pub(super) type __DraadBus = $bus;
-            include!(concat!(env!("OUT_DIR"), "/_generated.rs"));
-        }
-        pub use __draad_generated::*;
-    };
-}
+/// The scan → parse → emit pipeline `include_generated!` calls into.
+/// Re-exported for the rare consumer that wants to drive the codegen
+/// from a hand-written `build.rs` instead of the macro path.
+pub use draad_codegen as codegen;
 
-/// Scanner + emitter used from `build.rs` (and the `draad` bin).
-///
-/// Only available with the `codegen` feature enabled, runtime consumers
-/// don't pay the cost of pulling `syn`.
-#[cfg(feature = "codegen")]
-pub mod codegen;
-
-/// `Response` + `ok`: the axum response shim the generated handlers
-/// call into. Only available with the `runtime` feature enabled.
+/// `EventBus` + `ws_handler`: the axum-side runtime the generated
+/// handlers / emitters call into. Only available with the `runtime`
+/// feature enabled.
 #[cfg(feature = "runtime")]
 pub mod runtime;

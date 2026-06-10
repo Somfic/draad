@@ -1,5 +1,3 @@
-#![cfg(feature = "codegen")]
-
 mod common;
 
 #[test]
@@ -34,6 +32,18 @@ pub trait SearchApi {
     assert!(
         !out.contains("Query(__args)"),
         "default method must not use Query extractor:\n{out}"
+    );
+    assert!(
+        out.contains("-> Result<Json<Vec<Hit>>, MyError>"),
+        "expected Result<Json<Ok>, Err> handler signature:\n{out}"
+    );
+    assert!(
+        out.contains(".await.map(Json)"),
+        "expected `.map(Json)` to wrap the Ok side:\n{out}"
+    );
+    assert!(
+        !out.contains("Response<") && !out.contains("ok("),
+        "Response<T>/ok() shim should be gone:\n{out}"
     );
 }
 
@@ -166,10 +176,9 @@ pub trait FilesApi {
     // the codegen only walks the dir when `types_in_order` is non-empty.
 
     let client_dir = root.join("frontend");
-    draad::codegen::Config::new()
+    draad_codegen::Config::new()
         .root(&root)
         .client_dir(&client_dir)
-        .rpc_runtime("draad::runtime::{Response, ok}")
         .generate()
         .unwrap();
 

@@ -3,8 +3,6 @@
 //! `cargo test export_bindings`; here we fake those files so the test is
 //! self-contained.
 
-#![cfg(feature = "codegen")]
-
 mod common;
 
 #[test]
@@ -46,10 +44,9 @@ pub trait SearchApi {
     .unwrap();
 
     let client_dir = root.join("frontend");
-    draad::codegen::Config::new()
+    draad_codegen::Config::new()
         .root(&root)
         .client_dir(&client_dir)
-        .rpc_runtime("draad::runtime::{Response, ok}")
         .generate()
         .unwrap();
 

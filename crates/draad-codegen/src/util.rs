@@ -45,29 +45,3 @@ pub(super) fn last_path_segment(rust_ty: &str) -> String {
         .trim_end_matches("::");
     plain.rsplit("::").next().unwrap_or(plain).to_string()
 }
-
-/// Replaces every `bigint` token in a TS line with `number`. ts-rs maps
-/// i64/u64/usize/isize → `bigint`, but our method-arg mapping uses
-/// `number` and most app-domain ids/byte counts fit safely in JS Number
-/// range.
-pub(super) fn normalize_numbers(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let is_word_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-        if bytes[i..].starts_with(b"bigint") {
-            let prev_ok = i == 0 || !is_word_char(bytes[i - 1]);
-            let after = i + 6;
-            let next_ok = after >= bytes.len() || !is_word_char(bytes[after]);
-            if prev_ok && next_ok {
-                out.push_str("number");
-                i = after;
-                continue;
-            }
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
-}
