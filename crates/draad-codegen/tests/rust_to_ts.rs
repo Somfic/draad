@@ -9,7 +9,7 @@
 
 mod common;
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::Command;
 
 #[test]
@@ -94,7 +94,7 @@ fn find_bun() -> Option<String> {
 /// The bun-executable TS smoke test. Mocks `Rpc` directly so the test
 /// doesn't need to spin up an actual server — what we're verifying is
 /// the *generated client's* dispatch, not network behaviour.
-fn ts_test_program(client_dir: &PathBuf) -> String {
+fn ts_test_program(client_dir: &Path) -> String {
     let index = client_dir.join("index.ts");
     format!(
         r#"
