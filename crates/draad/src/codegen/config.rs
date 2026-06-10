@@ -160,7 +160,7 @@ pub fn generate(cfg: &Config) -> std::io::Result<()> {
                     type_to_module.insert(name.clone(), module.clone());
                     module_types.entry(module.clone()).or_default().push(name);
                 }
-                Item::Enum(e) if has_attr(&e.attrs, "wire") => {
+                Item::Enum(e) if has_attr(&e.attrs, "ty") => {
                     let name = e.ident.to_string();
                     type_to_module.insert(name.clone(), module.clone());
                     module_types.entry(module.clone()).or_default().push(name);

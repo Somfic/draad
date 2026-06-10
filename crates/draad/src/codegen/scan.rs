@@ -152,6 +152,13 @@ mod tests {
     }
 
     #[test]
+    fn has_attr_finds_ty_on_enum() {
+        let e: syn::ItemEnum = parse_quote! { #[ty] enum Kind { A, B } };
+        assert!(has_attr(&e.attrs, "ty"));
+        assert!(!has_attr(&e.attrs, "api"));
+    }
+
+    #[test]
     fn extract_namespace_bare_form() {
         let t: ItemTrait = parse_quote! {
             #[api(namespace = "search")]
