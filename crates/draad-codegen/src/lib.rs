@@ -12,14 +12,14 @@
 //!
 //! Internal layout:
 //!
-//!  - [`config`] — public `Config` builder.
-//!  - [`pipeline`] — drives scan → parse → emit.
-//!  - [`scan`] — walks the source tree, matches attributes.
-//!  - [`parse`] — `syn` AST → internal model.
-//!  - [`types`] — Rust ⇄ TypeScript type-shape mapping.
-//!  - [`model`] — plain data structs the parser hands to the emitters.
-//!  - [`emit_rust`] / [`emit_ts`] — write the two output files.
-//!  - [`util`] — small string helpers shared by parser + emitters.
+//!  - `config` — public `Config` builder.
+//!  - `pipeline` — drives scan → parse → emit.
+//!  - `scan` — walks the source tree, matches attributes.
+//!  - `parse` — `syn` AST → internal model.
+//!  - `types` — Rust ⇄ TypeScript type-shape mapping.
+//!  - `model` — plain data structs the parser hands to the emitters.
+//!  - `emit_rust` / `emit_ts` — write the two output files.
+//!  - `util` — small string helpers shared by parser + emitters.
 //!
 //! Designed to be called from a consumer's `build.rs`:
 //!
