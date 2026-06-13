@@ -235,7 +235,7 @@ pub struct Filter { pub q: String }
 #[api(namespace = "y")]
 pub trait YApi {
     #[get]
-    async fn search(&self, filter: Filter) -> Result<(), MyError>;
+    async fn search(&self, conn: &Conn, filter: Filter) -> Result<(), MyError>;
 }
 "#,
     )

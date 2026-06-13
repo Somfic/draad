@@ -10,8 +10,8 @@ use syn::Item;
 use super::config::Config;
 use super::emit_rust::{render_generated_rs, write_generated_rs};
 use super::emit_ts::{render_index, write_index};
-use super::model::{Api, EventApi};
-use super::parse::{parse_events_trait, parse_trait};
+use super::model::{Api, EventApi, RawApi};
+use super::parse::{parse_events_trait, parse_raw_trait, parse_trait};
 use super::scan::{collect_rs_files, extract_attr_namespace, has_attr};
 
 /// Rendered codegen output without any disk side effects, plus the list
@@ -47,7 +47,13 @@ pub fn run(cfg: &Config) -> std::io::Result<Artifacts> {
         .filter(|(_, items)| !items.is_empty())
         .map(|(m, _)| m.clone())
         .collect();
-    let rust_source = render_generated_rs(cfg, &scan.apis, &scan.event_apis, &ty_modules);
+    let rust_source = render_generated_rs(
+        cfg,
+        &scan.apis,
+        &scan.event_apis,
+        &scan.raw_apis,
+        &ty_modules,
+    );
     let ts_source = if cfg.rust_only {
         None
     } else {
@@ -55,6 +61,7 @@ pub fn run(cfg: &Config) -> std::io::Result<Artifacts> {
             &scan.ty_items_in_order(),
             &scan.apis,
             &scan.event_apis,
+            &scan.raw_apis,
         ))
     };
     Ok(Artifacts {
@@ -84,6 +91,7 @@ pub fn generate(cfg: &Config) -> std::io::Result<()> {
         &layout.generated_rs,
         &scan.apis,
         &scan.event_apis,
+        &scan.raw_apis,
         &ty_modules,
     )?;
     emit_output_directive(&layout.generated_rs);
@@ -97,6 +105,7 @@ pub fn generate(cfg: &Config) -> std::io::Result<()> {
         &scan.ty_items_in_order(),
         &scan.apis,
         &scan.event_apis,
+        &scan.raw_apis,
     )?;
     emit_output_directive(&layout.client_dir.join("index.ts"));
     Ok(())
@@ -154,6 +163,7 @@ impl ResolvedPaths {
 struct ScanResult {
     apis: Vec<Api>,
     event_apis: Vec<EventApi>,
+    raw_apis: Vec<RawApi>,
     /// `module_name` → list of `#[ty]` items declared in that module,
     /// in source order. Each item is the full `syn` node so the TS
     /// emitter can render the declaration directly.
@@ -194,6 +204,7 @@ fn scan_workspace(cfg: &Config, layout: &ResolvedPaths) -> std::io::Result<ScanR
     let mut module_types: BTreeMap<String, Vec<Item>> = BTreeMap::new();
     let mut apis: Vec<Api> = Vec::new();
     let mut event_apis: Vec<EventApi> = Vec::new();
+    let mut raw_apis: Vec<RawApi> = Vec::new();
     let mut imports: BTreeSet<String> = BTreeSet::new();
 
     let mut rs_files: Vec<PathBuf> = Vec::new();
@@ -235,6 +246,8 @@ fn scan_workspace(cfg: &Config, layout: &ResolvedPaths) -> std::io::Result<ScanR
                             module.clone(),
                             &mut imports,
                         ));
+                    } else if has_attr(&t.attrs, "raw") {
+                        raw_apis.push(parse_raw_trait(t, &mut imports));
                     }
                 }
                 _ => {}
@@ -244,9 +257,11 @@ fn scan_workspace(cfg: &Config, layout: &ResolvedPaths) -> std::io::Result<ScanR
 
     apis.sort_by(|a, b| a.namespace.cmp(&b.namespace));
     event_apis.sort_by(|a, b| a.namespace.cmp(&b.namespace));
+    raw_apis.sort_by(|a, b| a.class_name.cmp(&b.class_name));
     Ok(ScanResult {
         apis,
         event_apis,
+        raw_apis,
         module_types,
         files_read,
     })

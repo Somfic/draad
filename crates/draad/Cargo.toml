@@ -7,10 +7,19 @@ repository.workspace = true
 description = "Trait-driven RPC schema for Rust↔TypeScript. One trait → Axum router + TS client."
 
 [features]
-# The `runtime` module: ships `EventBus` and the default `ws_handler`
-# so consumers don't have to hand-write the broadcast plumbing or the
-# WS upgrade. Opt-in.
-runtime = ["dep:axum", "dep:serde", "dep:serde_json", "dep:tokio"]
+# The `runtime` module: ships `EventBus`, the default `ws_handler`, and the
+# stateful `Session`/`Clients` WebSocket system so consumers don't have to
+# hand-write the broadcast plumbing, the WS upgrade, or per-client
+# subscriptions. Opt-in.
+runtime = [
+    "dep:axum",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:tokio",
+    "dep:async-trait",
+    "dep:futures",
+    "dep:uuid",
+]
 
 [dependencies]
 draad-macros = { path = "../draad-macros", version = "0.2.0" }
@@ -23,4 +32,7 @@ draad-codegen = { path = "../draad-codegen", version = "0.2.0" }
 axum = { version = "0.8", optional = true, features = ["ws"] }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
-tokio = { version = "1", optional = true, features = ["sync", "macros"] }
+tokio = { version = "1", optional = true, features = ["sync", "macros", "rt"] }
+async-trait = { version = "0.1", optional = true }
+futures = { version = "0.3", optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }

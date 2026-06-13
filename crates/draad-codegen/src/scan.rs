@@ -63,6 +63,27 @@ pub(super) fn attr_path_matches(path: &syn::Path, name: &str) -> bool {
     segs.len() == 2 && segs[0] == "draad" && segs[1] == name
 }
 
+/// Pull the path template out of a `#[raw]` method's `#[get("/…")]` marker
+/// (any of the five verb names, bare or `draad::`-qualified). Matches only when
+/// the attr is a `Meta::List` whose body parses as a string literal — i.e.
+/// `#[get("/x")]`, not the bare `#[get]` verb marker used on `#[api]` traits.
+/// Returns the first match.
+pub(super) fn extract_raw_path(attrs: &[syn::Attribute]) -> Option<String> {
+    const VERBS: &[&str] = &["get", "post", "put", "patch", "delete"];
+    for attr in attrs {
+        let Meta::List(list) = &attr.meta else {
+            continue;
+        };
+        if !VERBS.iter().any(|v| attr_path_matches(attr.path(), v)) {
+            continue;
+        }
+        if let Ok(s) = syn::parse2::<syn::LitStr>(list.tokens.clone()) {
+            return Some(s.value());
+        }
+    }
+    None
+}
+
 pub(super) fn extract_docs(attrs: &[syn::Attribute]) -> Vec<String> {
     let mut lines = Vec::new();
     for attr in attrs {

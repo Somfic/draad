@@ -6,9 +6,10 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use super::model::{Api, EventApi, Param, Verb};
+use super::model::{Api, EventApi, Param, PathSeg, RawApi, Verb};
 use super::ty_decl::emit_ty_decl;
-use super::util::capitalize;
+use super::types::is_numeric_rust;
+use super::util::{capitalize, snake_to_camel};
 use super::writer::Writer;
 
 /// Transport interface, error type, and a default REST+WS `Rpc`
@@ -23,6 +24,7 @@ pub(super) fn render_index(
     ty_items: &[&syn::Item],
     apis: &[Api],
     event_apis: &[EventApi],
+    raw_apis: &[RawApi],
 ) -> String {
     let mut w = Writer::new("\t");
 
@@ -44,8 +46,11 @@ pub(super) fn render_index(
     for ev in event_apis {
         write_events_class(&mut w, ev);
     }
+    for raw in raw_apis {
+        write_urls_class(&mut w, raw);
+    }
 
-    write_aggregator(&mut w, apis, event_apis);
+    write_aggregator(&mut w, apis, event_apis, raw_apis);
 
     w.blank();
     w.raw(RPC_RUNTIME_TS);
@@ -58,11 +63,12 @@ pub(super) fn write_index(
     ty_items: &[&syn::Item],
     apis: &[Api],
     event_apis: &[EventApi],
+    raw_apis: &[RawApi],
 ) -> std::io::Result<()> {
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let out = render_index(ty_items, apis, event_apis);
+    let out = render_index(ty_items, apis, event_apis, raw_apis);
     // Skip the write if the file already matches — otherwise we'd bump
     // its mtime on every build, which combined with the
     // `cargo:rerun-if-changed=index.ts` directive emit_cargo_directives
@@ -104,8 +110,10 @@ fn write_api_class(w: &mut Writer, api: &Api) {
 }
 
 fn write_api_method(w: &mut Writer, api: &Api, m: &super::model::Method) {
-    let param_decl = m
-        .params
+    // Injected `conn: &Conn` params are server-filled — they never appear in
+    // the client signature or the args object.
+    let wire: Vec<&super::model::Param> = m.params.iter().filter(|p| p.conn.is_none()).collect();
+    let param_decl = wire
         .iter()
         .map(|p| format!("{}: {}", p.name, p.ts_type))
         .collect::<Vec<_>>()
@@ -115,11 +123,10 @@ fn write_api_method(w: &mut Writer, api: &Api, m: &super::model::Method) {
     // verbatim — keeps existing generated TS byte-identical. For other
     // verbs we always pass an args object (even `{}`) so the verb sits
     // in the third slot.
-    let args_obj = if m.params.is_empty() {
+    let args_obj = if wire.is_empty() {
         "{}".to_string()
     } else {
-        let names = m
-            .params
+        let names = wire
             .iter()
             .map(|p| p.name.clone())
             .collect::<Vec<_>>()
@@ -127,7 +134,7 @@ fn write_api_method(w: &mut Writer, api: &Api, m: &super::model::Method) {
         format!("{{ {names} }}")
     };
     let call_tail = if m.verb == Verb::Post {
-        if m.params.is_empty() {
+        if wire.is_empty() {
             String::new()
         } else {
             format!(", {args_obj}")
@@ -150,6 +157,63 @@ fn write_api_method(w: &mut Writer, api: &Api, m: &super::model::Method) {
             ns = api.namespace,
             name = m.rust_name,
         ));
+    });
+    w.line("}");
+}
+
+/// A no-ctor class of pure URL-builders for a `#[raw]` trait. Aggregated on
+/// the `Api` as `api.urls`.
+fn write_urls_class(w: &mut Writer, raw: &RawApi) {
+    w.blank();
+    write_jsdoc(w, &raw.docs);
+    w.line(&format!("export class {} {{", raw.class_name));
+    w.indented(|w| {
+        for m in &raw.methods {
+            write_url_method(w, m);
+        }
+    });
+    w.line("}");
+}
+
+fn write_url_method(w: &mut Writer, m: &super::model::RawEndpoint) {
+    let param_decl = m
+        .params
+        .iter()
+        .map(|p| format!("{}: {}", snake_to_camel(&p.name), p.ts_type))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // Build the template literal from the parsed segments: static text
+    // verbatim, `{name}` String → encodeURIComponent, numeric / catch-all → raw.
+    let mut body = String::new();
+    for seg in &m.segments {
+        match seg {
+            PathSeg::Static(s) => body.push_str(s),
+            PathSeg::Param { name, catch_all } => {
+                let camel = snake_to_camel(name);
+                let numeric = m
+                    .params
+                    .iter()
+                    .find(|p| &p.name == name)
+                    .is_some_and(|p| is_numeric_rust(&p.rust_type));
+                if *catch_all || numeric {
+                    body.push_str(&format!("${{{camel}}}"));
+                } else {
+                    body.push_str(&format!("${{encodeURIComponent({camel})}}"));
+                }
+            }
+        }
+    }
+
+    w.blank();
+    write_method_jsdoc(w, &m.docs, &m.params, None);
+    w.line(&format!(
+        "{name}({decl}): string {{",
+        name = m.ts_name,
+        decl = param_decl,
+    ));
+    w.indented(|w| {
+        w.line(&format!("return `{body}`;"));
     });
     w.line("}");
 }
@@ -181,7 +245,7 @@ fn write_events_class(w: &mut Writer, ev: &EventApi) {
     w.line("}");
 }
 
-fn write_aggregator(w: &mut Writer, apis: &[Api], event_apis: &[EventApi]) {
+fn write_aggregator(w: &mut Writer, apis: &[Api], event_apis: &[EventApi], raw_apis: &[RawApi]) {
     w.blank();
     w.line("export class Api {");
     w.indented(|w| {
@@ -201,6 +265,10 @@ fn write_aggregator(w: &mut Writer, apis: &[Api], event_apis: &[EventApi]) {
                 cls = ev.class_name
             ));
         }
+        for raw in raw_apis {
+            write_jsdoc(w, &raw.docs);
+            w.line(&format!("urls: {cls};", cls = raw.class_name));
+        }
         w.blank();
         w.line("constructor(private rpc: Rpc) {");
         w.indented(|w| {
@@ -217,6 +285,10 @@ fn write_aggregator(w: &mut Writer, apis: &[Api], event_apis: &[EventApi]) {
                     ns = ev.namespace,
                     cls = ev.class_name
                 ));
+            }
+            // URL-builders are pure string helpers — no transport needed.
+            for raw in raw_apis {
+                w.line(&format!("this.urls = new {cls}();", cls = raw.class_name));
             }
         });
         w.line("}");
@@ -259,7 +331,9 @@ fn write_method_jsdoc(
     err_ts: Option<&str>,
 ) {
     let has_method = !method_docs.is_empty();
-    let has_params = params.iter().any(|p| !p.docs.is_empty());
+    let has_params = params
+        .iter()
+        .any(|p| p.conn.is_none() && !p.docs.is_empty());
     let has_throws = err_ts.is_some();
     if !has_method && !has_params && !has_throws {
         return;
@@ -273,7 +347,7 @@ fn write_method_jsdoc(
         w.line(&format!(" * {line}"));
     }
     for p in params {
-        if p.docs.is_empty() {
+        if p.conn.is_some() || p.docs.is_empty() {
             continue;
         }
         let summary = p.docs.join(" ");

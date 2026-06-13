@@ -27,15 +27,16 @@
 //! draad::include_generated!(AppContext, EventBus);
 //! ```
 
-pub use draad_macros::{api, events, include_generated, ty};
+pub use draad_macros::{api, events, include_generated, raw, ty};
 
 /// The scan → parse → emit pipeline `include_generated!` calls into.
 /// Re-exported for the rare consumer that wants to drive the codegen
 /// from a hand-written `build.rs` instead of the macro path.
 pub use draad_codegen as codegen;
 
-/// `EventBus` + `ws_handler`: the axum-side runtime the generated
-/// handlers / emitters call into. Only available with the `runtime`
-/// feature enabled.
+/// The axum-side runtime the generated handlers / emitters call into:
+/// `EventBus`, the stateless `ws_handler`, and the stateful
+/// `Session`/`Conn`/`Clients` system with per-client subscriptions. Only
+/// available with the `runtime` feature enabled.
 #[cfg(feature = "runtime")]
 pub mod runtime;

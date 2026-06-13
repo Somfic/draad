@@ -6,6 +6,17 @@ pub(super) struct Param {
     pub ts_type: String,
     pub rust_type: String,
     pub docs: Vec<String>,
+    /// `Some` when this is an injected connection parameter (`conn: &Conn` /
+    /// `conn: Option<&Conn>`) rather than a wire argument. Such params are
+    /// excluded from the wire args struct and the TS client signature; the
+    /// generated handler fills them from the caller's live connection.
+    pub conn: Option<ConnInject>,
+}
+
+/// Marks a `&Conn` (required) / `Option<&Conn>` (optional) injected parameter.
+#[derive(Copy, Clone)]
+pub(super) struct ConnInject {
+    pub required: bool,
 }
 
 pub(super) struct Method {
@@ -100,4 +111,37 @@ pub(super) struct EventApi {
     pub class_name: String,
     pub docs: Vec<String>,
     pub events: Vec<Event>,
+}
+
+/// One path segment of a `#[raw]` endpoint template, in source order. Drives
+/// the TS encode decision: `Static` is interpolated verbatim, a non-catch-all
+/// `Param` of a `String` type is `encodeURIComponent`'d, numeric or catch-all
+/// params are interpolated raw.
+pub(super) enum PathSeg {
+    /// Literal text between params (includes the leading/trailing slashes).
+    Static(String),
+    /// `{name}` (catch_all = false) or `{*name}` (catch_all = true).
+    Param { name: String, catch_all: bool },
+}
+
+/// One `#[get("/…")]` method on a `#[raw]` trait.
+pub(super) struct RawEndpoint {
+    pub rust_name: String,
+    pub ts_name: String,
+    /// The path template verbatim, e.g. `/api/stream/{info_hash}/{file_idx}`.
+    /// Emitted as the Rust `&str` const value.
+    pub path_template: String,
+    /// Path params in declaration order (plain `String`/integer types).
+    pub params: Vec<Param>,
+    /// Parsed template, used by the TS emitter to build the interpolation.
+    pub segments: Vec<PathSeg>,
+    pub docs: Vec<String>,
+}
+
+/// A `#[raw]` manifest: a flat set of URL endpoints. Emits a TS `Urls` class
+/// (`api.urls`) of URL-builders plus a Rust `urls` module of path constants.
+pub(super) struct RawApi {
+    pub class_name: String,
+    pub docs: Vec<String>,
+    pub methods: Vec<RawEndpoint>,
 }

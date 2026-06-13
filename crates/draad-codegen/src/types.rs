@@ -192,6 +192,26 @@ fn is_primitive(t: &str) -> bool {
     )
 }
 
+/// Whether a (normalized) Rust type string is a numeric primitive. Used by the
+/// `#[raw]` URL-builder to decide whether a path param is interpolated raw
+/// (numbers) or `encodeURIComponent`'d (strings).
+pub(super) fn is_numeric_rust(rust_type: &str) -> bool {
+    matches!(
+        rust_type.trim(),
+        "u8" | "u16"
+            | "u32"
+            | "u64"
+            | "usize"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "isize"
+            | "f32"
+            | "f64"
+    )
+}
+
 /// `strip_wrapper("Option<String>", "Option")` → `Some("String")`.
 fn strip_wrapper<'a>(t: &'a str, name: &str) -> Option<&'a str> {
     let rest = t.strip_prefix(name)?.trim_start();

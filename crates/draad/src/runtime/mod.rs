@@ -13,22 +13,40 @@
 //!  - Events: WS frames shaped `{ topic: string, payload: T }`,
 //!    broadcast to every connected client.
 
+use std::sync::Arc;
+
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response as AxumResponse;
 use serde::Serialize;
 use tokio::sync::broadcast;
 
+mod session;
+pub use session::{session_handler, Caller, Conn, ConnId, Conns, Session};
+
 // ──────────────────────────────────────────────────────────────────────
 // Event bus + WebSocket handler
 // ──────────────────────────────────────────────────────────────────────
+
+/// One serialised event on the bus: the ready-to-send wire `json`
+/// (`{ topic, payload }`) plus its `topic` broken out so per-connection
+/// handlers (see [`Session`]) can filter by subscription without re-parsing
+/// the payload. Wrapped in an [`Arc`] on the channel so fan-out to every
+/// subscriber is a pointer clone.
+#[derive(Clone)]
+pub struct Frame {
+    /// The event topic, e.g. `streams_stats`.
+    pub topic: String,
+    /// The full `{ "topic": ..., "payload": ... }` JSON string sent to clients.
+    pub json: String,
+}
 
 /// Backing channel for the generated `*Emitter` types. Each emit
 /// serialises to a `{ topic, payload }` JSON frame and fans out to every
 /// subscriber. Cheap to clone, internally a [`tokio::sync::broadcast::Sender`].
 #[derive(Clone)]
 pub struct EventBus {
-    sender: broadcast::Sender<String>,
+    sender: broadcast::Sender<Arc<Frame>>,
 }
 
 impl EventBus {
@@ -41,15 +59,18 @@ impl EventBus {
     }
 
     /// Subscribe a new receiver. Typically called once per WS connection.
-    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<Frame>> {
         self.sender.subscribe()
     }
 
     /// Publish a `{ topic, payload }` frame to all subscribers. No-op if
     /// nobody is currently connected.
     pub fn publish<T: ?Sized + Serialize>(&self, topic: &str, payload: &T) {
-        let frame = serde_json::json!({ "topic": topic, "payload": payload });
-        let _ = self.sender.send(frame.to_string());
+        let json = serde_json::json!({ "topic": topic, "payload": payload }).to_string();
+        let _ = self.sender.send(Arc::new(Frame {
+            topic: topic.to_string(),
+            json,
+        }));
     }
 }
 
@@ -86,8 +107,8 @@ async fn ws_session(mut socket: WebSocket, bus: EventBus) {
     loop {
         tokio::select! {
             frame = rx.recv() => match frame {
-                Ok(text) => {
-                    if socket.send(Message::Text(text.into())).await.is_err() {
+                Ok(frame) => {
+                    if socket.send(Message::Text(frame.json.clone().into())).await.is_err() {
                         return;
                     }
                 }

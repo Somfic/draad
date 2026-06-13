@@ -163,6 +163,21 @@ pub fn events(attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::new()
 }
 
+/// Declares a set of browser-direct binary/streaming HTTP endpoints (range
+/// video, images, HLS segments…). Like [`events`], the trait is a pure
+/// manifest — never implemented, erased at compile time, read from source by
+/// the codegen. Each method carries a path template via a `#[get("/path/{x}")]`
+/// marker; the codegen emits a TypeScript URL-builder (`api.urls.*`) and Rust
+/// path constants (`crate::urls::*`). draad does **not** serve the bytes — mount
+/// your own Axum handlers against those constants.
+#[proc_macro_attribute]
+pub fn raw(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    // Erase the trait (and its `#[get("…")]` method markers) entirely; the
+    // codegen reads the path templates from source.
+    let _input = parse_macro_input!(item as ItemTrait);
+    TokenStream::new()
+}
+
 /// Drive the whole codegen pipeline at macro-expansion time.
 ///
 /// ```ignore
