@@ -1,5 +1,5 @@
 //! Axum server mounting the draad-generated `rpc_router()` plus a stateful
-//! WebSocket [`session_handler`](draad::runtime::session_handler) — each
+//! WebSocket [`session_handler`](session_handler) — each
 //! connection gets its own session, its own topic subscriptions, and a
 //! shared presence roster (see [`api::presence`]).
 //!
