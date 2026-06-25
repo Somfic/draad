@@ -15,25 +15,21 @@
 //! type and which feature tripped the limit, so the build fails loudly
 //! instead of silently emitting wrong TS.
 
-use std::collections::BTreeSet;
-
 use syn::{Attribute, Expr, ExprLit, Fields, Item, ItemEnum, ItemStruct, Lit, Meta, Token};
 
 use super::scan::extract_docs;
 use super::types::rust_type_to_ts;
 
 /// Render a single `#[ty]` item as `export type Foo = ...;\n\n`.
-/// `imports` is appended to with any user-defined types referenced so
-/// the caller can verify the references resolve in the unified file.
-pub(super) fn emit_ty_decl(item: &Item, imports: &mut BTreeSet<String>) -> String {
+pub(super) fn emit_ty_decl(item: &Item) -> String {
     match item {
-        Item::Struct(s) => emit_struct(s, imports),
+        Item::Struct(s) => emit_struct(s),
         Item::Enum(e) => emit_enum(e),
         _ => unreachable!("scanner only collects #[ty] structs/enums"),
     }
 }
 
-fn emit_struct(s: &ItemStruct, imports: &mut BTreeSet<String>) -> String {
+fn emit_struct(s: &ItemStruct) -> String {
     let name = s.ident.to_string();
     if !s.generics.params.is_empty() {
         panic!("#[ty] does not support generic types (struct `{name}` has type/lifetime params)");
@@ -65,7 +61,7 @@ fn emit_struct(s: &ItemStruct, imports: &mut BTreeSet<String>) -> String {
         let ident = f.ident.as_ref().unwrap().to_string();
         let wire_name = serde_field_rename(&f.attrs)
             .unwrap_or_else(|| apply_rename_all(&ident, rename_all.as_deref()));
-        let ty = rust_type_to_ts(&f.ty, imports);
+        let ty = rust_type_to_ts(&f.ty);
         let field_docs = extract_docs(&f.attrs);
         if field_docs.is_empty() {
             field_lines.push(format!("{wire_name}: {ty}"));

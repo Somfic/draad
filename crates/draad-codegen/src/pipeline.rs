@@ -205,7 +205,6 @@ fn scan_workspace(cfg: &Config, layout: &ResolvedPaths) -> std::io::Result<ScanR
     let mut apis: Vec<Api> = Vec::new();
     let mut event_apis: Vec<EventApi> = Vec::new();
     let mut raw_apis: Vec<RawApi> = Vec::new();
-    let mut imports: BTreeSet<String> = BTreeSet::new();
 
     let mut rs_files: Vec<PathBuf> = Vec::new();
     collect_rs_files(&layout.src_dir, &mut rs_files);
@@ -238,16 +237,11 @@ fn scan_workspace(cfg: &Config, layout: &ResolvedPaths) -> std::io::Result<ScanR
                 }
                 Item::Trait(t) => {
                     if let Some(namespace) = extract_attr_namespace(t, "api") {
-                        apis.push(parse_trait(t, namespace, module.clone(), &mut imports));
+                        apis.push(parse_trait(t, namespace, module.clone()));
                     } else if let Some(namespace) = extract_attr_namespace(t, "events") {
-                        event_apis.push(parse_events_trait(
-                            t,
-                            namespace,
-                            module.clone(),
-                            &mut imports,
-                        ));
+                        event_apis.push(parse_events_trait(t, namespace, module.clone()));
                     } else if has_attr(&t.attrs, "raw") {
-                        raw_apis.push(parse_raw_trait(t, &mut imports));
+                        raw_apis.push(parse_raw_trait(t));
                     }
                 }
                 _ => {}

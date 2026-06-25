@@ -6,14 +6,10 @@
 //! All knowledge of which `Verb` arg shapes are query-string-safe lives
 //! here too, since it's a question about Rust types.
 
-use std::collections::BTreeSet;
-
 use syn::{GenericArgument, PathArguments, Type};
 
-/// Map a Rust type to its TypeScript counterpart, recording any
-/// user-defined types seen on the way so the caller can emit the right
-/// `import` lines.
-pub(super) fn rust_type_to_ts(ty: &Type, imports: &mut BTreeSet<String>) -> String {
+/// Map a Rust type to its TypeScript counterpart
+pub(super) fn rust_type_to_ts(ty: &Type) -> String {
     match ty {
         Type::Tuple(t) if t.elems.is_empty() => "void".into(),
         Type::Path(p) => {
@@ -26,20 +22,18 @@ pub(super) fn rust_type_to_ts(ty: &Type, imports: &mut BTreeSet<String>) -> Stri
                 | "f32" | "f64" => "number".into(),
                 "Vec" => {
                     let inner = first_generic(&seg.arguments)
-                        .map(|t| rust_type_to_ts(t, imports))
+                        .map(rust_type_to_ts)
                         .unwrap_or_else(|| "unknown".into());
                     format!("{inner}[]")
                 }
                 "Option" => {
                     let inner = first_generic(&seg.arguments)
-                        .map(|t| rust_type_to_ts(t, imports))
+                        .map(rust_type_to_ts)
                         .unwrap_or_else(|| "unknown".into());
                     format!("{inner} | null")
                 }
-                _ => {
-                    imports.insert(name.clone());
-                    name
-                }
+                // TODO: Add support for custom type mapping
+                _ => name,
             }
         }
         _ => "unknown".into(),
@@ -72,21 +66,21 @@ pub(super) fn rust_type_to_string(ty: &Type) -> String {
 
 /// Map the *Ok* half of a `Result<T, _>` return to TS. For non-Result
 /// returns this is equivalent to [`rust_type_to_ts`] on the whole type.
-pub(super) fn extract_result_inner_ts(ty: &Type, imports: &mut BTreeSet<String>) -> String {
+pub(super) fn extract_result_inner_ts(ty: &Type) -> String {
     if let Type::Path(p) = ty {
         let seg = p.path.segments.last().unwrap();
         if seg.ident == "Result" || seg.ident == "RpcResult" {
             if let Some(inner) = first_generic(&seg.arguments) {
-                return rust_type_to_ts(inner, imports);
+                return rust_type_to_ts(inner);
             }
         }
     }
-    rust_type_to_ts(ty, imports)
+    rust_type_to_ts(ty)
 }
 
 /// Map the *Err* half of a `Result<_, E>` return to TS. Returns `None`
 /// for non-`Result` returns or unrecognised shapes.
-pub(super) fn extract_result_err_ts(ty: &Type, imports: &mut BTreeSet<String>) -> Option<String> {
+pub(super) fn extract_result_err_ts(ty: &Type) -> Option<String> {
     let Type::Path(p) = ty else { return None };
     let seg = p.path.segments.last()?;
     if seg.ident != "Result" && seg.ident != "RpcResult" {
@@ -102,7 +96,7 @@ pub(super) fn extract_result_err_ts(ty: &Type, imports: &mut BTreeSet<String>) -
             _ => None,
         })
         .nth(1)
-        .map(|t| rust_type_to_ts(t, imports))
+        .map(rust_type_to_ts)
 }
 
 /// Given the stringified return type of a method (already normalised by

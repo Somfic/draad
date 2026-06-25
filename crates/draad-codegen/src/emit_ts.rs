@@ -2,7 +2,6 @@
 //! interface, every wire type, the per-namespace classes, and the `Api`
 //! aggregator.
 
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
@@ -85,10 +84,9 @@ pub(super) fn write_index(
 /// directly from its `syn::Item`. Each block is preceded by a separator
 /// blank line so the output reads like the previous ts-rs-driven shape.
 fn render_ty_decls(w: &mut Writer, ty_items: &[&syn::Item]) {
-    let mut imports: BTreeSet<String> = BTreeSet::new();
     for item in ty_items {
         w.blank();
-        let rendered = emit_ty_decl(item, &mut imports);
+        let rendered = emit_ty_decl(item);
         // The renderer already manages its own indentation; splice in
         // verbatim at column 0 rather than letting the Writer's indent
         // level re-indent.
