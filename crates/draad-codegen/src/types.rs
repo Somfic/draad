@@ -6,10 +6,27 @@
 //! All knowledge of which `Verb` arg shapes are query-string-safe lives
 //! here too, since it's a question about Rust types.
 
+use std::collections::BTreeSet;
+
 use syn::{GenericArgument, PathArguments, Type};
 
+/// Resolution context for [`rust_type_to_ts`]. Lets the fallthrough case
+/// distinguish between types that exist locally in the generated
+/// `index.ts` (the `#[ty]` set) and types the user must define by hand
+/// in a sidecar module.
+pub(super) struct TypeCtx<'a> {
+    /// Names of `#[ty]`-decorated structs/enums collected during scan.
+    /// These are emitted as `export type Foo = ...;` at the top of
+    /// `index.ts`, so references to them in API signatures stay bare.
+    pub local_tys: &'a BTreeSet<String>,
+    /// When `Some(m)`, unknown type names are emitted as `m.TypeName` and
+    /// `index.ts` gains an `import * as m from "./m";` line. `None`
+    /// preserves the legacy behavior of emitting the bare name.
+    pub custom_module: Option<&'a str>,
+}
+
 /// Map a Rust type to its TypeScript counterpart
-pub(super) fn rust_type_to_ts(ty: &Type) -> String {
+pub(super) fn rust_type_to_ts(ty: &Type, ctx: &TypeCtx<'_>) -> String {
     match ty {
         Type::Tuple(t) if t.elems.is_empty() => "void".into(),
         Type::Path(p) => {
@@ -22,18 +39,20 @@ pub(super) fn rust_type_to_ts(ty: &Type) -> String {
                 | "f32" | "f64" => "number".into(),
                 "Vec" => {
                     let inner = first_generic(&seg.arguments)
-                        .map(rust_type_to_ts)
+                        .map(|t| rust_type_to_ts(t, ctx))
                         .unwrap_or_else(|| "unknown".into());
                     format!("{inner}[]")
                 }
                 "Option" => {
                     let inner = first_generic(&seg.arguments)
-                        .map(rust_type_to_ts)
+                        .map(|t| rust_type_to_ts(t, ctx))
                         .unwrap_or_else(|| "unknown".into());
                     format!("{inner} | null")
                 }
-                // TODO: Add support for custom type mapping
-                _ => name,
+                _ => match ctx.custom_module {
+                    Some(m) if !ctx.local_tys.contains(&name) => format!("{m}.{name}"),
+                    _ => name,
+                },
             }
         }
         _ => "unknown".into(),
@@ -66,21 +85,21 @@ pub(super) fn rust_type_to_string(ty: &Type) -> String {
 
 /// Map the *Ok* half of a `Result<T, _>` return to TS. For non-Result
 /// returns this is equivalent to [`rust_type_to_ts`] on the whole type.
-pub(super) fn extract_result_inner_ts(ty: &Type) -> String {
+pub(super) fn extract_result_inner_ts(ty: &Type, ctx: &TypeCtx<'_>) -> String {
     if let Type::Path(p) = ty {
         let seg = p.path.segments.last().unwrap();
         if seg.ident == "Result" || seg.ident == "RpcResult" {
             if let Some(inner) = first_generic(&seg.arguments) {
-                return rust_type_to_ts(inner);
+                return rust_type_to_ts(inner, ctx);
             }
         }
     }
-    rust_type_to_ts(ty)
+    rust_type_to_ts(ty, ctx)
 }
 
 /// Map the *Err* half of a `Result<_, E>` return to TS. Returns `None`
 /// for non-`Result` returns or unrecognised shapes.
-pub(super) fn extract_result_err_ts(ty: &Type) -> Option<String> {
+pub(super) fn extract_result_err_ts(ty: &Type, ctx: &TypeCtx<'_>) -> Option<String> {
     let Type::Path(p) = ty else { return None };
     let seg = p.path.segments.last()?;
     if seg.ident != "Result" && seg.ident != "RpcResult" {
@@ -96,7 +115,7 @@ pub(super) fn extract_result_err_ts(ty: &Type) -> Option<String> {
             _ => None,
         })
         .nth(1)
-        .map(rust_type_to_ts)
+        .map(|t| rust_type_to_ts(t, ctx))
 }
 
 /// Given the stringified return type of a method (already normalised by

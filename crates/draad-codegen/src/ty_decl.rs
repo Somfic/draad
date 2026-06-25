@@ -18,18 +18,18 @@
 use syn::{Attribute, Expr, ExprLit, Fields, Item, ItemEnum, ItemStruct, Lit, Meta, Token};
 
 use super::scan::extract_docs;
-use super::types::rust_type_to_ts;
+use super::types::{rust_type_to_ts, TypeCtx};
 
 /// Render a single `#[ty]` item as `export type Foo = ...;\n\n`.
-pub(super) fn emit_ty_decl(item: &Item) -> String {
+pub(super) fn emit_ty_decl(item: &Item, ctx: &TypeCtx<'_>) -> String {
     match item {
-        Item::Struct(s) => emit_struct(s),
+        Item::Struct(s) => emit_struct(s, ctx),
         Item::Enum(e) => emit_enum(e),
         _ => unreachable!("scanner only collects #[ty] structs/enums"),
     }
 }
 
-fn emit_struct(s: &ItemStruct) -> String {
+fn emit_struct(s: &ItemStruct, ctx: &TypeCtx<'_>) -> String {
     let name = s.ident.to_string();
     if !s.generics.params.is_empty() {
         panic!("#[ty] does not support generic types (struct `{name}` has type/lifetime params)");
@@ -61,7 +61,7 @@ fn emit_struct(s: &ItemStruct) -> String {
         let ident = f.ident.as_ref().unwrap().to_string();
         let wire_name = serde_field_rename(&f.attrs)
             .unwrap_or_else(|| apply_rename_all(&ident, rename_all.as_deref()));
-        let ty = rust_type_to_ts(&f.ty);
+        let ty = rust_type_to_ts(&f.ty, ctx);
         let field_docs = extract_docs(&f.attrs);
         if field_docs.is_empty() {
             field_lines.push(format!("{wire_name}: {ty}"));

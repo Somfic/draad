@@ -12,11 +12,16 @@ use super::model::{
 use super::scan::{attr_path_matches, extract_docs, extract_raw_path};
 use super::types::{
     extract_result_err_ts, extract_result_inner_ts, is_query_safe, rust_type_to_string,
-    rust_type_to_ts,
+    rust_type_to_ts, TypeCtx,
 };
 use super::util::snake_to_camel;
 
-pub(super) fn parse_trait(t: &ItemTrait, namespace: String, module: String) -> Api {
+pub(super) fn parse_trait(
+    t: &ItemTrait,
+    namespace: String,
+    module: String,
+    ctx: &TypeCtx<'_>,
+) -> Api {
     let mut methods = Vec::new();
     for item in &t.items {
         let TraitItem::Fn(method) = item else {
@@ -27,14 +32,14 @@ pub(super) fn parse_trait(t: &ItemTrait, namespace: String, module: String) -> A
         let command = format!("{namespace}_{rust_name}");
         let docs = extract_docs(&method.attrs);
         let verb = parse_verb(&method.attrs, &rust_name);
-        let params = parse_params(&method.sig.inputs, &method.sig.ident);
+        let params = parse_params(&method.sig.inputs, &method.sig.ident, ctx);
         let Return {
             ret_ts,
             ret_rust,
             returns_result,
             err_rust,
             err_ts,
-        } = parse_return(&method.sig.output);
+        } = parse_return(&method.sig.output, ctx);
 
         if !verb.has_body() {
             for p in &params {
@@ -77,7 +82,12 @@ pub(super) fn parse_trait(t: &ItemTrait, namespace: String, module: String) -> A
     }
 }
 
-pub(super) fn parse_events_trait(t: &ItemTrait, namespace: String, module: String) -> EventApi {
+pub(super) fn parse_events_trait(
+    t: &ItemTrait,
+    namespace: String,
+    module: String,
+    ctx: &TypeCtx<'_>,
+) -> EventApi {
     let mut events = Vec::new();
     for item in &t.items {
         let TraitItem::Fn(method) = item else {
@@ -89,7 +99,7 @@ pub(super) fn parse_events_trait(t: &ItemTrait, namespace: String, module: Strin
         let mut payload_rust = "()".to_string();
         for arg in &method.sig.inputs {
             let FnArg::Typed(pat) = arg else { continue };
-            payload_ts = rust_type_to_ts(&pat.ty);
+            payload_ts = rust_type_to_ts(&pat.ty, ctx);
             payload_rust = rust_type_to_string(&pat.ty);
         }
         events.push(Event {
@@ -110,7 +120,7 @@ pub(super) fn parse_events_trait(t: &ItemTrait, namespace: String, module: Strin
     }
 }
 
-pub(super) fn parse_raw_trait(t: &ItemTrait) -> RawApi {
+pub(super) fn parse_raw_trait(t: &ItemTrait, ctx: &TypeCtx<'_>) -> RawApi {
     let mut methods = Vec::new();
     for item in &t.items {
         let TraitItem::Fn(method) = item else {
@@ -120,7 +130,7 @@ pub(super) fn parse_raw_trait(t: &ItemTrait) -> RawApi {
         let path_template = extract_raw_path(&method.attrs).unwrap_or_else(|| {
             panic!("#[raw] method `{rust_name}` is missing a `#[get(\"/...\")]` path attribute")
         });
-        let params = parse_params(&method.sig.inputs, &method.sig.ident);
+        let params = parse_params(&method.sig.inputs, &method.sig.ident, ctx);
         for p in &params {
             if !is_query_safe(&p.rust_type) {
                 panic!(
@@ -186,6 +196,7 @@ fn parse_path_template(template: &str, method: &str) -> Vec<PathSeg> {
 fn parse_params(
     inputs: &syn::punctuated::Punctuated<FnArg, syn::Token![,]>,
     method_ident: &syn::Ident,
+    ctx: &TypeCtx<'_>,
 ) -> Vec<Param> {
     let mut params = Vec::new();
     for arg in inputs {
@@ -209,7 +220,7 @@ fn parse_params(
         }
         params.push(Param {
             name,
-            ts_type: rust_type_to_ts(&pat.ty),
+            ts_type: rust_type_to_ts(&pat.ty, ctx),
             rust_type: rust_type_to_string(&pat.ty),
             docs: extract_docs(&pat.attrs),
             conn: None,
@@ -253,7 +264,7 @@ struct Return {
     err_ts: Option<String>,
 }
 
-fn parse_return(output: &ReturnType) -> Return {
+fn parse_return(output: &ReturnType, ctx: &TypeCtx<'_>) -> Return {
     let ReturnType::Type(_, ty) = output else {
         return Return {
             ret_ts: "void".into(),
@@ -268,9 +279,9 @@ fn parse_return(output: &ReturnType) -> Return {
         seg.ident == "Result" || seg.ident == "RpcResult"
     });
     let ret_rust = rust_type_to_string(ty);
-    let ret_ts = extract_result_inner_ts(ty);
+    let ret_ts = extract_result_inner_ts(ty, ctx);
     let (err_rust, err_ts) = if returns_result {
-        let err_ts = extract_result_err_ts(ty);
+        let err_ts = extract_result_err_ts(ty, ctx);
         let err_rust = super::types::result_err_type(&ret_rust);
         (err_rust, err_ts)
     } else {

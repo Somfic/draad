@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
-use syn::Item;
+use syn::{Item, ItemTrait};
 
 use super::config::Config;
 use super::emit_rust::{render_generated_rs, write_generated_rs};
@@ -13,6 +13,7 @@ use super::emit_ts::{render_index, write_index};
 use super::model::{Api, EventApi, RawApi};
 use super::parse::{parse_events_trait, parse_raw_trait, parse_trait};
 use super::scan::{collect_rs_files, extract_attr_namespace, has_attr};
+use super::types::TypeCtx;
 
 /// Rendered codegen output without any disk side effects, plus the list
 /// of source files the scanner read. The proc-macro driver wants both
@@ -57,11 +58,16 @@ pub fn run(cfg: &Config) -> std::io::Result<Artifacts> {
     let ts_source = if cfg.rust_only {
         None
     } else {
+        let ctx = TypeCtx {
+            local_tys: &scan.local_tys,
+            custom_module: cfg.custom_ts.as_deref(),
+        };
         Some(render_index(
             &scan.ty_items_in_order(),
             &scan.apis,
             &scan.event_apis,
             &scan.raw_apis,
+            &ctx,
         ))
     };
     Ok(Artifacts {
@@ -100,12 +106,17 @@ pub fn generate(cfg: &Config) -> std::io::Result<()> {
         return Ok(());
     }
 
+    let ctx = TypeCtx {
+        local_tys: &scan.local_tys,
+        custom_module: cfg.custom_ts.as_deref(),
+    };
     write_index(
         &layout.client_dir.join("index.ts"),
         &scan.ty_items_in_order(),
         &scan.apis,
         &scan.event_apis,
         &scan.raw_apis,
+        &ctx,
     )?;
     emit_output_directive(&layout.client_dir.join("index.ts"));
     Ok(())
@@ -168,6 +179,10 @@ struct ScanResult {
     /// in source order. Each item is the full `syn` node so the TS
     /// emitter can render the declaration directly.
     module_types: BTreeMap<String, Vec<Item>>,
+    /// Set of all `#[ty]` struct/enum idents found across the workspace.
+    /// Fed to [`TypeCtx`] so the unknown-type fallthrough can tell
+    /// "user-defined in this index.ts" from "needs the custom sidecar".
+    local_tys: BTreeSet<String>,
     /// Every `.rs` file the scanner enumerated under `src_dir`, even
     /// the ones it ended up skipping. Used for invalidation tracking.
     files_read: Vec<PathBuf>,
@@ -200,16 +215,37 @@ fn item_ident(item: &Item) -> String {
     }
 }
 
+/// A trait deferred from the first scan pass. We can't parse traits
+/// inline because [`TypeCtx`] needs the *full* set of `#[ty]` idents,
+/// which isn't known until every file has been visited.
+enum PendingTrait {
+    Api {
+        namespace: String,
+        module: String,
+        trait_: ItemTrait,
+    },
+    Events {
+        namespace: String,
+        module: String,
+        trait_: ItemTrait,
+    },
+    Raw {
+        trait_: ItemTrait,
+    },
+}
+
 fn scan_workspace(cfg: &Config, layout: &ResolvedPaths) -> std::io::Result<ScanResult> {
     let mut module_types: BTreeMap<String, Vec<Item>> = BTreeMap::new();
-    let mut apis: Vec<Api> = Vec::new();
-    let mut event_apis: Vec<EventApi> = Vec::new();
-    let mut raw_apis: Vec<RawApi> = Vec::new();
+    let mut pending: Vec<PendingTrait> = Vec::new();
 
     let mut rs_files: Vec<PathBuf> = Vec::new();
     collect_rs_files(&layout.src_dir, &mut rs_files);
     rs_files.sort();
     let files_read = rs_files.clone();
+
+    // First pass: collect `#[ty]` items and stash traits for later. We
+    // can't parse traits yet: `rust_type_to_ts` needs to know every
+    // `#[ty]` ident before it can tell "local" from "custom".
     for path in &rs_files {
         let module = path.file_stem().unwrap().to_string_lossy().into_owned();
         if module == layout.generated_stem || cfg.skip_files.iter().any(|s| s == &module) {
@@ -237,15 +273,55 @@ fn scan_workspace(cfg: &Config, layout: &ResolvedPaths) -> std::io::Result<ScanR
                 }
                 Item::Trait(t) => {
                     if let Some(namespace) = extract_attr_namespace(t, "api") {
-                        apis.push(parse_trait(t, namespace, module.clone()));
+                        pending.push(PendingTrait::Api {
+                            namespace,
+                            module: module.clone(),
+                            trait_: t.clone(),
+                        });
                     } else if let Some(namespace) = extract_attr_namespace(t, "events") {
-                        event_apis.push(parse_events_trait(t, namespace, module.clone()));
+                        pending.push(PendingTrait::Events {
+                            namespace,
+                            module: module.clone(),
+                            trait_: t.clone(),
+                        });
                     } else if has_attr(&t.attrs, "raw") {
-                        raw_apis.push(parse_raw_trait(t));
+                        pending.push(PendingTrait::Raw { trait_: t.clone() });
                     }
                 }
                 _ => {}
             }
+        }
+    }
+
+    // Build the `#[ty]` ident set before parsing traits so unknown-type
+    // refs in API/event signatures can resolve correctly.
+    let local_tys: BTreeSet<String> = module_types
+        .values()
+        .flatten()
+        .map(item_ident)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let ctx = TypeCtx {
+        local_tys: &local_tys,
+        custom_module: cfg.custom_ts.as_deref(),
+    };
+
+    let mut apis: Vec<Api> = Vec::new();
+    let mut event_apis: Vec<EventApi> = Vec::new();
+    let mut raw_apis: Vec<RawApi> = Vec::new();
+    for entry in pending {
+        match entry {
+            PendingTrait::Api {
+                namespace,
+                module,
+                trait_,
+            } => apis.push(parse_trait(&trait_, namespace, module, &ctx)),
+            PendingTrait::Events {
+                namespace,
+                module,
+                trait_,
+            } => event_apis.push(parse_events_trait(&trait_, namespace, module, &ctx)),
+            PendingTrait::Raw { trait_ } => raw_apis.push(parse_raw_trait(&trait_, &ctx)),
         }
     }
 
@@ -257,6 +333,7 @@ fn scan_workspace(cfg: &Config, layout: &ResolvedPaths) -> std::io::Result<ScanR
         event_apis,
         raw_apis,
         module_types,
+        local_tys,
         files_read,
     })
 }

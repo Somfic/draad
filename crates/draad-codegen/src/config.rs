@@ -30,6 +30,15 @@ pub struct Config {
     /// only need `_generated.rs` to be fresh so the backend compiles.
     /// Default: false.
     pub rust_only: bool,
+
+    /// Hand-written sidecar module for type names draad can't resolve.
+    /// `Some("custom")` makes the generated `index.ts` start with
+    /// `import * as custom from "./custom";` and rewrites unknown type
+    /// references in API signatures, event payloads, and `#[ty]` fields
+    /// from a bare `Foo` to `custom.Foo`.
+    ///
+    /// Default: `None`.
+    pub custom_ts: Option<String>,
 }
 
 impl Default for Config {
@@ -42,6 +51,7 @@ impl Default for Config {
             api_modules_prefix: "crate::api".into(),
             skip_files: vec!["lib".into(), "main".into(), "mod".into()],
             rust_only: false,
+            custom_ts: None,
         }
     }
 }
@@ -77,6 +87,13 @@ impl Config {
     }
     pub fn rust_only(mut self) -> Self {
         self.rust_only = true;
+        self
+    }
+    /// Enable the custom-types sidecar module. `name` is used as both the
+    /// imported file stem (`./<name>.ts`) and the import alias, so unknown
+    /// types render as `<name>.TypeName`.
+    pub fn custom_ts(mut self, name: impl Into<String>) -> Self {
+        self.custom_ts = Some(name.into());
         self
     }
     /// Run the codegen with this configuration.
