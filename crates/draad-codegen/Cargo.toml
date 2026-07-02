@@ -10,3 +10,4 @@ description = "Code generator for the draad RPC schema. Drives the scan → pars
 syn = { version = "2", features = ["full", "extra-traits", "parsing"] }
 quote = "1"
 proc-macro2 = "1"
+serde = "1"

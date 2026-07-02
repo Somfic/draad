@@ -7,10 +7,16 @@
 //!   splices in alongside the trait. Because the chunk lives in the
 //!   same module as the trait, handler signatures resolve types via
 //!   that module's existing `use` statements.
+//! * [`render_module_events`] is called by `#[events]` on a trait at macro
+//!   expansion time. It returns a Rust source chunk: a wrapper module
+//!   containing the per-namespace `*Emitter<__B>` struct + impl, and a
+//!   generic `create_emitter<__B: Bus>` factory, spliced in alongside
+//!   (and in place of) the trait.
 //! * [`render_generated_rs`] is the aggregator that `include_generated!`
 //!   splices at the call site. It emits the `__DraadState`/`__DraadBus`
 //!   aliases, `pub fn rpc_router()` which chains each module's
-//!   `apply_routes`, the events emitters, and `#[raw]` URL constants.
+//!   `apply_routes`, the `Events` aggregator (which references the
+//!   per-module emitter types), and `#[raw]` URL constants.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -18,7 +24,7 @@ use std::path::Path;
 
 use super::config::Config;
 use super::model::{Api, ConnInject, EventApi, Method, RawApi};
-use super::parse::parse_trait;
+use super::parse::{parse_events_trait, parse_trait};
 use super::types::{result_ok_type, TypeCtx};
 use super::util::{capitalize, last_path_segment, snake_to_camel};
 use super::writer::Writer;
@@ -45,19 +51,30 @@ pub fn render_module_rust(t: &syn::ItemTrait, namespace: &str) -> String {
     w.into_string()
 }
 
+/// Render the per-module Rust chunk for a single `#[events]` trait.
+pub fn render_module_events(t: &syn::ItemTrait, namespace: &str) -> String {
+    let empty: BTreeSet<String> = BTreeSet::new();
+    let ctx = TypeCtx {
+        local_tys: &empty,
+        custom_module: None,
+    };
+    let ev = parse_events_trait(t, namespace.to_string(), String::new(), &ctx);
+    let mut w = Writer::new("    ");
+    write_module_emitter_chunk(&mut w, &ev);
+    w.into_string()
+}
+
 pub(super) fn render_generated_rs(
     cfg: &Config,
     apis: &[Api],
     event_apis: &[EventApi],
     raw_apis: &[RawApi],
-    ty_modules: &[String],
 ) -> String {
     let mut w = Writer::new("    ");
 
     write_aggregator_header(&mut w);
-    write_aggregator_uses(&mut w, cfg, event_apis, ty_modules);
     write_rpc_router(&mut w, cfg, apis);
-    write_event_emitters(&mut w, event_apis);
+    write_event_emitters(&mut w, cfg, event_apis);
     write_url_consts(&mut w, raw_apis);
 
     w.into_string()
@@ -69,9 +86,8 @@ pub(super) fn write_generated_rs(
     apis: &[Api],
     event_apis: &[EventApi],
     raw_apis: &[RawApi],
-    ty_modules: &[String],
 ) -> std::io::Result<()> {
-    let out = render_generated_rs(cfg, apis, event_apis, raw_apis, ty_modules);
+    let out = render_generated_rs(cfg, apis, event_apis, raw_apis);
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -128,6 +144,75 @@ fn write_module_chunk(w: &mut Writer, api: &Api) {
     w.line(&format!(
         "pub use {module_ident}::apply_routes as __draad_{namespace}_apply_routes;",
         namespace = api.namespace
+    ));
+    w.blank();
+}
+
+/// Write the per-module chunk: a wrapper `mod __draad_<ns>_emitter`
+/// containing the `*Emitter<__B>` struct + impl and a `pub create_emitter`
+/// factory, plus `pub use` re-exports that lift them into the trait module's
+/// namespace.
+fn write_module_emitter_chunk(w: &mut Writer, ev: &EventApi) {
+    let module_ident = format!("__draad_{}_emitter", ev.namespace);
+    let pascal = format!("{}Emitter", capitalize(&snake_to_camel(&ev.namespace)));
+    const GENERIC_B: &str = "__B";
+    const BUS_BOUND: &str = "::draad::codegen::Bus";
+
+    w.line("#[doc(hidden)]");
+    w.line("#[allow(non_camel_case_types, dead_code, unused_imports)]");
+    w.line(&format!("mod {module_ident} {{"));
+    w.indented(|w| {
+        w.line("use super::*;");
+        w.blank();
+
+        w.line("#[derive(Clone)]");
+        w.line(&format!("pub struct {pascal}<{GENERIC_B}> {{"));
+        w.indented(|w| {
+            w.line(&format!("bus: {GENERIC_B},"));
+        });
+        w.line("}");
+        w.blank();
+
+        w.line(&format!(
+            "impl<{GENERIC_B}: {BUS_BOUND}> {pascal}<{GENERIC_B}> {{"
+        ));
+        w.indented(|w| {
+            for e in &ev.events {
+                let payload = last_path_segment(&e.payload_rust);
+                w.line(&format!(
+                    "/// Publishes the `{wire}` event to all WS subscribers.",
+                    wire = e.wire
+                ));
+                w.line(&format!(
+                    "pub fn emit_{name}(&self, payload: &{payload}) {{",
+                    name = e.rust_name,
+                ));
+                w.indented(|w| {
+                    w.line(&format!(
+                        "self.bus.publish(\"{wire}\", payload);",
+                        wire = e.wire
+                    ));
+                });
+                w.line("}");
+            }
+        });
+        w.line("}");
+        w.blank();
+
+        w.line(&format!(
+            "pub fn create_emitter<{GENERIC_B}: {BUS_BOUND}>(bus: {GENERIC_B}) -> {pascal}<{GENERIC_B}> {{"
+        ));
+        w.indented(|w| {
+            w.line(&format!("{pascal} {{ bus }}"));
+        });
+        w.line("}");
+    });
+    w.line("}");
+    w.blank();
+    w.line(&format!("pub use {module_ident}::{pascal};",));
+    w.line(&format!(
+        "pub use {module_ident}::create_emitter as __draad_{namespace}_create_emitter;",
+        namespace = ev.namespace
     ));
     w.blank();
 }
@@ -307,33 +392,6 @@ fn write_aggregator_header(w: &mut Writer) {
     w.blank();
 }
 
-/// The aggregator no longer needs to import handler-side types: those
-/// resolve inside each api module. It still needs `use crate::api::<mod>::*;`
-/// for the modules whose payload types the event emitters reference.
-fn write_aggregator_uses(
-    w: &mut Writer,
-    cfg: &Config,
-    event_apis: &[EventApi],
-    ty_modules: &[String],
-) {
-    let mut modules: BTreeSet<&str> = BTreeSet::new();
-    for ev in event_apis {
-        modules.insert(ev.module.as_str());
-    }
-    for module in ty_modules {
-        modules.insert(module.as_str());
-    }
-    for module in &modules {
-        w.line(&format!(
-            "use {prefix}::{module}::*;",
-            prefix = cfg.api_modules_prefix
-        ));
-    }
-    if !modules.is_empty() {
-        w.blank();
-    }
-}
-
 /// `pub fn rpc_router() -> Router<__DraadState>` that builds an empty
 /// `Router` and threads it through each api module's `apply_routes`.
 fn write_rpc_router(w: &mut Writer, cfg: &Config, apis: &[Api]) {
@@ -363,43 +421,22 @@ fn write_rpc_router(w: &mut Writer, cfg: &Config, apis: &[Api]) {
     w.blank();
 }
 
-fn write_event_emitters(w: &mut Writer, event_apis: &[EventApi]) {
-    for ev in event_apis {
-        let pascal = capitalize(&snake_to_camel(&ev.namespace));
-        w.line("#[derive(Clone)]");
-        w.line(&format!("pub struct {pascal}Emitter {{ bus: {BUS_TY} }}"));
-        w.blank();
-        w.line(&format!("impl {pascal}Emitter {{"));
-        w.indented(|w| {
-            for e in &ev.events {
-                let payload = last_path_segment(&e.payload_rust);
-                w.line(&format!(
-                    "/// Publishes the `{wire}` event to all WS subscribers.",
-                    wire = e.wire
-                ));
-                w.line(&format!(
-                    "pub fn emit_{name}(&self, payload: &{payload}) {{",
-                    name = e.rust_name,
-                ));
-                w.indented(|w| {
-                    w.line(&format!(
-                        "self.bus.publish(\"{wire}\", payload);",
-                        wire = e.wire
-                    ));
-                });
-                w.line("}");
-            }
-        });
-        w.line("}");
-        w.blank();
-    }
-
+/// Emit the `Events` aggregator struct and its `new()` constructor.
+/// The individual `*Emitter<__B>` structs are now generated per-module by
+/// `#[events]` (via `write_module_emitter_chunk`); the aggregator only wires
+/// them together under one roof.
+fn write_event_emitters(w: &mut Writer, cfg: &Config, event_apis: &[EventApi]) {
     w.line("#[derive(Clone)]");
     w.line("pub struct Events {");
     w.indented(|w| {
         for ev in event_apis {
-            let pascal = capitalize(&snake_to_camel(&ev.namespace));
-            w.line(&format!("pub {ns}: {pascal}Emitter,", ns = ev.namespace));
+            let pascal = format!(
+                "{prefix}::{module}::{namespace}Emitter",
+                prefix = cfg.api_modules_prefix,
+                module = ev.module,
+                namespace = capitalize(&snake_to_camel(&ev.namespace))
+            );
+            w.line(&format!("pub {ns}: {pascal}<{BUS_TY}>,", ns = ev.namespace));
         }
     });
     w.line("}");
@@ -413,10 +450,11 @@ fn write_event_emitters(w: &mut Writer, event_apis: &[EventApi]) {
             w.line("Self {");
             w.indented(|w| {
                 for ev in event_apis {
-                    let pascal = capitalize(&snake_to_camel(&ev.namespace));
                     w.line(&format!(
-                        "{ns}: {pascal}Emitter {{ bus: bus.clone() }},",
-                        ns = ev.namespace
+                        "{namespace}: {prefix}::{module}::__draad_{namespace}_create_emitter(bus.clone()),",
+                        prefix = cfg.api_modules_prefix,
+                        module = ev.module,
+                        namespace = ev.namespace,
                     ));
                 }
             });

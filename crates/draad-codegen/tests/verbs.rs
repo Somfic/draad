@@ -48,7 +48,7 @@ pub trait FilesApi {
     );
 
     assert!(
-        out.contains("Query(__args): ::axum::extract::Query<__files_serve_args>"),
+        out.contains("Query(__args): Query<__files_serve_args>"),
         "expected Query extractor for #[get]:\n{out}"
     );
     assert!(
@@ -75,7 +75,7 @@ pub trait HlsApi {
     );
 
     assert!(
-        out.contains("Query(__args): ::axum::extract::Query<__hls_stop_args>"),
+        out.contains("Query(__args): Query<__hls_stop_args>"),
         "expected Query extractor for #[delete]:\n{out}"
     );
     assert!(

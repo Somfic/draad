@@ -42,19 +42,7 @@ pub struct Artifacts {
 pub fn run(cfg: &Config) -> std::io::Result<Artifacts> {
     let layout = ResolvedPaths::from_config(cfg);
     let scan = scan_workspace(cfg, &layout)?;
-    let ty_modules: Vec<String> = scan
-        .module_types
-        .iter()
-        .filter(|(_, items)| !items.is_empty())
-        .map(|(m, _)| m.clone())
-        .collect();
-    let rust_source = render_generated_rs(
-        cfg,
-        &scan.apis,
-        &scan.event_apis,
-        &scan.raw_apis,
-        &ty_modules,
-    );
+    let rust_source = render_generated_rs(cfg, &scan.apis, &scan.event_apis, &scan.raw_apis);
     let ts_source = if cfg.rust_only {
         None
     } else {
@@ -86,19 +74,12 @@ pub fn generate(cfg: &Config) -> std::io::Result<()> {
 
     let scan = scan_workspace(cfg, &layout)?;
 
-    let ty_modules: Vec<String> = scan
-        .module_types
-        .iter()
-        .filter(|(_, items)| !items.is_empty())
-        .map(|(m, _)| m.clone())
-        .collect();
     write_generated_rs(
         cfg,
         &layout.generated_rs,
         &scan.apis,
         &scan.event_apis,
         &scan.raw_apis,
-        &ty_modules,
     )?;
     emit_output_directive(&layout.generated_rs);
 

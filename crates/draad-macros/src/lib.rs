@@ -171,15 +171,27 @@ fn is_verb_marker(attr: &syn::Attribute) -> bool {
 }
 
 /// Declares a namespace of backend→frontend events. The annotated trait is
-/// a pure manifest consumed by the codegen, never implemented, erased at
-/// compile time. Codegen reads the trait from source, not from expansion.
+/// a pure manifest consumed by the codegen; it is erased at compile time
+/// and replaced by the per-namespace `*Emitter<__B>` struct, impl, and
+/// `create_emitter` factory. Codegen reads the trait from source for
+/// TypeScript generation and the `Events` aggregator.
 #[proc_macro_attribute]
 pub fn events(attr: TokenStream, item: TokenStream) -> TokenStream {
-    if let Err(ts) = parse_namespace(attr, "events") {
-        return ts;
+    let namespace = match parse_namespace(attr, "events") {
+        Ok(ns) => ns,
+        Err(ts) => return ts,
+    };
+    let t = parse_macro_input!(item as ItemTrait);
+    let chunk = draad_codegen::render_module_events(&t, &namespace);
+    match syn::parse_str::<proc_macro2::TokenStream>(&chunk) {
+        Ok(ts) => ts.into(),
+        Err(e) => syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("draad: rendered emitter chunk is invalid Rust: {e}"),
+        )
+        .to_compile_error()
+        .into(),
     }
-    let _input = parse_macro_input!(item as ItemTrait);
-    TokenStream::new()
 }
 
 /// Declares a set of browser-direct binary/streaming HTTP endpoints (range

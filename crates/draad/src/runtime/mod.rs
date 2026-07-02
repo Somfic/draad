@@ -80,6 +80,12 @@ impl Default for EventBus {
     }
 }
 
+impl ::draad_codegen::Bus for EventBus {
+    fn publish<T: Serialize + ?Sized>(&self, topic: &str, payload: &T) {
+        EventBus::publish(self, topic, payload);
+    }
+}
+
 /// Default axum WebSocket handler: subscribes to the `EventBus` and
 /// forwards every published frame to the client. Mount it like:
 ///
