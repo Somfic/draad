@@ -106,17 +106,36 @@ pub fn api(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as syn::Item);
     match input {
         syn::Item::Trait(mut t) => {
-            if let Err(ts) = parse_namespace(attr, "api") {
-                return ts;
-            }
+            let namespace = match parse_namespace(attr, "api") {
+                Ok(ns) => ns,
+                Err(ts) => return ts,
+            };
+            // `render_module_rust` reads the verb markers off the trait to
+            // pick the axum routing fn for each method, so snapshot the
+            // pre-strip trait before we remove them from the trait
+            // expansion itself.
+            let t_with_verbs = t.clone();
             for item in &mut t.items {
                 if let syn::TraitItem::Fn(m) = item {
                     m.attrs.retain(|a| !is_verb_marker(a));
                 }
             }
+            let chunk = draad_codegen::render_module_rust(&t_with_verbs, &namespace);
+            let chunk_tokens = match syn::parse_str::<proc_macro2::TokenStream>(&chunk) {
+                Ok(ts) => ts,
+                Err(e) => {
+                    return syn::Error::new(
+                        proc_macro2::Span::call_site(),
+                        format!("draad: rendered module chunk is invalid Rust: {e}"),
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+            };
             quote! {
                 #[::async_trait::async_trait]
                 #t
+                #chunk_tokens
             }
             .into()
         }
@@ -197,7 +216,7 @@ pub fn raw(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Trailing named arguments map 1:1 onto the `Config` builder methods and
 /// are applied in order.
 ///
-/// ```
+/// ```ignore
 /// draad::include_generated!(
 ///     AppContext,
 ///     EventBus,

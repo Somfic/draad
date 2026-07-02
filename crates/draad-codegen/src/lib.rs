@@ -46,4 +46,5 @@ mod util;
 mod writer;
 
 pub use config::Config;
+pub use emit_rust::render_module_rust;
 pub use pipeline::{generate, run, Artifacts};

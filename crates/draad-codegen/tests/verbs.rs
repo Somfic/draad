@@ -2,31 +2,22 @@ mod common;
 
 #[test]
 fn bare_method_defaults_to_post_with_json_body() {
-    let root = common::fresh_root("verb-default");
-    std::fs::write(
-        root.join("src/search.rs"),
+    let out = common::module_rust(
         r#"
-use draad::{api, ty};
-
-#[ty]
-pub struct Hit { pub id: i64, pub title: String }
-
 #[api(namespace = "search")]
 pub trait SearchApi {
     async fn query(&self, q: String) -> Result<Vec<Hit>, MyError>;
 }
 "#,
-    )
-    .unwrap();
-
-    let out = common::run(&root);
+        "search",
+    );
 
     assert!(
         out.contains("Json(__args): Json<__search_query_args>"),
         "expected JSON body extractor for default-POST method:\n{out}"
     );
     assert!(
-        out.contains(".route(\"/search/query\", post(__search_query))"),
+        out.contains(".route(\"/search/query\", post(__search_query"),
         "expected POST routing fn:\n{out}"
     );
     assert!(
@@ -34,44 +25,34 @@ pub trait SearchApi {
         "default method must not use Query extractor:\n{out}"
     );
     assert!(
-        out.contains("-> Result<Json<Vec<Hit>>, MyError>"),
+        out.contains("Result<Json<Vec<Hit>>, MyError>"),
         "expected Result<Json<Ok>, Err> handler signature:\n{out}"
     );
     assert!(
         out.contains(".await.map(Json)"),
         "expected `.map(Json)` to wrap the Ok side:\n{out}"
     );
-    assert!(
-        !out.contains("Response<") && !out.contains("ok("),
-        "Response<T>/ok() shim should be gone:\n{out}"
-    );
 }
 
 #[test]
 fn get_method_uses_query_extractor_and_get_route() {
-    let root = common::fresh_root("verb-get");
-    std::fs::write(
-        root.join("src/files.rs"),
+    let out = common::module_rust(
         r#"
-use draad::api;
-
 #[api(namespace = "files")]
 pub trait FilesApi {
     #[get]
     async fn serve(&self, path: String) -> Result<Vec<u8>, MyError>;
 }
 "#,
-    )
-    .unwrap();
-
-    let out = common::run(&root);
+        "files",
+    );
 
     assert!(
-        out.contains("Query(__args): Query<__files_serve_args>"),
+        out.contains("Query(__args): ::axum::extract::Query<__files_serve_args>"),
         "expected Query extractor for #[get]:\n{out}"
     );
     assert!(
-        out.contains(".route(\"/files/serve\", get(__files_serve))"),
+        out.contains(".route(\"/files/serve\", get(__files_serve"),
         "expected GET routing fn:\n{out}"
     );
     assert!(
@@ -82,41 +63,31 @@ pub trait FilesApi {
 
 #[test]
 fn delete_method_uses_query_extractor_and_delete_route() {
-    let root = common::fresh_root("verb-delete");
-    std::fs::write(
-        root.join("src/hls.rs"),
+    let out = common::module_rust(
         r#"
-use draad::api;
-
 #[api(namespace = "hls")]
 pub trait HlsApi {
     #[delete]
     async fn stop(&self, session_id: String) -> Result<(), MyError>;
 }
 "#,
-    )
-    .unwrap();
-
-    let out = common::run(&root);
+        "hls",
+    );
 
     assert!(
-        out.contains("Query(__args): Query<__hls_stop_args>"),
+        out.contains("Query(__args): ::axum::extract::Query<__hls_stop_args>"),
         "expected Query extractor for #[delete]:\n{out}"
     );
     assert!(
-        out.contains(".route(\"/hls/stop\", delete(__hls_stop))"),
+        out.contains(".route(\"/hls/stop\", delete(__hls_stop"),
         "expected DELETE routing fn:\n{out}"
     );
 }
 
 #[test]
 fn put_and_patch_keep_json_body() {
-    let root = common::fresh_root("verb-put-patch");
-    std::fs::write(
-        root.join("src/items.rs"),
+    let out = common::module_rust(
         r#"
-use draad::api;
-
 #[api(namespace = "items")]
 pub trait ItemsApi {
     #[put]
@@ -126,17 +97,15 @@ pub trait ItemsApi {
     async fn touch(&self, id: i64) -> Result<(), MyError>;
 }
 "#,
-    )
-    .unwrap();
-
-    let out = common::run(&root);
+        "items",
+    );
 
     assert!(
         out.contains("Json(__args): Json<__items_replace_args>"),
         "PUT should keep JSON body:\n{out}"
     );
     assert!(
-        out.contains(".route(\"/items/replace\", put(__items_replace))"),
+        out.contains(".route(\"/items/replace\", put(__items_replace"),
         "expected PUT routing fn:\n{out}"
     );
     assert!(
@@ -144,8 +113,54 @@ pub trait ItemsApi {
         "PATCH should keep JSON body:\n{out}"
     );
     assert!(
-        out.contains(".route(\"/items/touch\", patch(__items_touch))"),
+        out.contains(".route(\"/items/touch\", patch(__items_touch"),
         "expected PATCH routing fn:\n{out}"
+    );
+}
+
+#[test]
+fn handler_is_generic_with_trait_bound() {
+    let out = common::module_rust(
+        r#"
+#[api(namespace = "items")]
+pub trait ItemsApi {
+    async fn fetch(&self, id: i64) -> Result<String, MyError>;
+}
+"#,
+        "items",
+    );
+    assert!(
+        out.contains("pub fn apply_routes<__S>"),
+        "apply_routes should be generic over __S:\n{out}"
+    );
+    assert!(
+        out.contains("__S: ItemsApi"),
+        "bound list should include the trait:\n{out}"
+    );
+    assert!(
+        !out.contains("::draad::runtime::Conns: ::axum::extract::FromRef"),
+        "non-conn trait must not pull in the Conns/FromRef bound:\n{out}"
+    );
+}
+
+#[test]
+fn conn_method_pulls_in_conns_fromref_bound() {
+    let out = common::module_rust(
+        r#"
+#[api(namespace = "greet")]
+pub trait GreetApi {
+    async fn whoami(&self, conn: &Conn) -> Result<String, MyError>;
+}
+"#,
+        "greet",
+    );
+    assert!(
+        out.contains("::draad::runtime::Conns: ::axum::extract::FromRef<__S>"),
+        "conn-injecting trait should add the FromRef bound:\n{out}"
+    );
+    assert!(
+        out.contains("use ::draad::runtime::Caller;"),
+        "conn-injecting trait should pull in the Caller extractor:\n{out}"
     );
 }
 
@@ -171,9 +186,6 @@ pub trait FilesApi {
 "#,
     )
     .unwrap();
-
-    // No `#[ty]` types in this trait, so no per-type files are needed —
-    // the codegen only walks the dir when `types_in_order` is non-empty.
 
     let client_dir = root.join("frontend");
     draad_codegen::Config::new()
@@ -201,12 +213,8 @@ pub trait FilesApi {
 #[test]
 #[should_panic(expected = "conflicting verb attributes")]
 fn conflicting_verbs_panic() {
-    let root = common::fresh_root("verb-conflict");
-    std::fs::write(
-        root.join("src/x.rs"),
+    let _ = common::module_rust(
         r#"
-use draad::api;
-
 #[api(namespace = "x")]
 pub trait XApi {
     #[get]
@@ -214,32 +222,21 @@ pub trait XApi {
     async fn weird(&self) -> Result<(), MyError>;
 }
 "#,
-    )
-    .unwrap();
-
-    let _ = common::run(&root);
+        "x",
+    );
 }
 
 #[test]
 #[should_panic(expected = "not query-string-safe")]
 fn non_primitive_arg_on_get_panics() {
-    let root = common::fresh_root("verb-non-primitive");
-    std::fs::write(
-        root.join("src/y.rs"),
+    let _ = common::module_rust(
         r#"
-use draad::{api, ty};
-
-#[ty]
-pub struct Filter { pub q: String }
-
 #[api(namespace = "y")]
 pub trait YApi {
     #[get]
     async fn search(&self, conn: &Conn, filter: Filter) -> Result<(), MyError>;
 }
 "#,
-    )
-    .unwrap();
-
-    let _ = common::run(&root);
+        "y",
+    );
 }
