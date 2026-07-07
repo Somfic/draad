@@ -106,17 +106,36 @@ pub fn api(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as syn::Item);
     match input {
         syn::Item::Trait(mut t) => {
-            if let Err(ts) = parse_namespace(attr, "api") {
-                return ts;
-            }
+            let namespace = match parse_namespace(attr, "api") {
+                Ok(ns) => ns,
+                Err(ts) => return ts,
+            };
+            // `render_module_rust` reads the verb markers off the trait to
+            // pick the axum routing fn for each method, so snapshot the
+            // pre-strip trait before we remove them from the trait
+            // expansion itself.
+            let t_with_verbs = t.clone();
             for item in &mut t.items {
                 if let syn::TraitItem::Fn(m) = item {
                     m.attrs.retain(|a| !is_verb_marker(a));
                 }
             }
+            let chunk = draad_codegen::render_module_rust(&t_with_verbs, &namespace);
+            let chunk_tokens = match syn::parse_str::<proc_macro2::TokenStream>(&chunk) {
+                Ok(ts) => ts,
+                Err(e) => {
+                    return syn::Error::new(
+                        proc_macro2::Span::call_site(),
+                        format!("draad: rendered module chunk is invalid Rust: {e}"),
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+            };
             quote! {
                 #[::async_trait::async_trait]
                 #t
+                #chunk_tokens
             }
             .into()
         }
@@ -152,15 +171,27 @@ fn is_verb_marker(attr: &syn::Attribute) -> bool {
 }
 
 /// Declares a namespace of backend→frontend events. The annotated trait is
-/// a pure manifest consumed by the codegen, never implemented, erased at
-/// compile time. Codegen reads the trait from source, not from expansion.
+/// a pure manifest consumed by the codegen; it is erased at compile time
+/// and replaced by the per-namespace `*Emitter<__B>` struct, impl, and
+/// `create_emitter` factory. Codegen reads the trait from source for
+/// TypeScript generation and the `Events` aggregator.
 #[proc_macro_attribute]
 pub fn events(attr: TokenStream, item: TokenStream) -> TokenStream {
-    if let Err(ts) = parse_namespace(attr, "events") {
-        return ts;
+    let namespace = match parse_namespace(attr, "events") {
+        Ok(ns) => ns,
+        Err(ts) => return ts,
+    };
+    let t = parse_macro_input!(item as ItemTrait);
+    let chunk = draad_codegen::render_module_events(&t, &namespace);
+    match syn::parse_str::<proc_macro2::TokenStream>(&chunk) {
+        Ok(ts) => ts.into(),
+        Err(e) => syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("draad: rendered emitter chunk is invalid Rust: {e}"),
+        )
+        .to_compile_error()
+        .into(),
     }
-    let _input = parse_macro_input!(item as ItemTrait);
-    TokenStream::new()
 }
 
 /// Declares a set of browser-direct binary/streaming HTTP endpoints (range
@@ -191,6 +222,27 @@ pub fn raw(_attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// `include_bytes!` invalidation guards are emitted for every scanned
 /// file so rustc re-expands when sources change.
+///
+/// ## Overriding the codegen [`Config`](::draad_codegen::Config)
+///
+/// Trailing named arguments map 1:1 onto the `Config` builder methods and
+/// are applied in order.
+///
+/// ```ignore
+/// draad::include_generated!(
+///     AppContext,
+///     EventBus,
+///     custom_ts = "custom",
+///     client_dir = "frontend/src/schema",
+///     skip_file = "internal",
+///     rust_only,
+/// );
+/// ```
+///
+/// Supported keys: `custom_ts`, `src_dir`, `generated_rs`, `client_dir`,
+/// `api_modules_prefix`, `skip_file` (string-valued, repeatable), and
+/// `rust_only` (bare flag). `root` is owned by the macro and not
+/// overridable - it always resolves to `CARGO_MANIFEST_DIR`.
 #[proc_macro]
 pub fn include_generated(input: TokenStream) -> TokenStream {
     let args = parse_macro_input!(input as IncludeGeneratedArgs);
@@ -200,22 +252,96 @@ pub fn include_generated(input: TokenStream) -> TokenStream {
 struct IncludeGeneratedArgs {
     state: syn::Type,
     bus: Option<syn::Type>,
+    options: Vec<ConfigOpt>,
 }
+
+enum ConfigOpt {
+    CustomTs(syn::LitStr),
+    SrcDir(syn::LitStr),
+    GeneratedRs(syn::LitStr),
+    ClientDir(syn::LitStr),
+    ApiModulesPrefix(syn::LitStr),
+    SkipFile(syn::LitStr),
+    RustOnly,
+}
+
+const OPTION_KEYS: &[&str] = &[
+    "custom_ts",
+    "src_dir",
+    "generated_rs",
+    "client_dir",
+    "api_modules_prefix",
+    "skip_file",
+    "rust_only",
+];
 
 impl syn::parse::Parse for IncludeGeneratedArgs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let state: syn::Type = input.parse()?;
-        let bus = if input.peek(Token![,]) {
+        let mut bus = None;
+        let mut options = Vec::new();
+
+        // Optional `, bus`. The bus position holds a type; if what follows
+        // the comma is a known option keyword instead, skip it and let the
+        // option loop pick it up.
+        if input.peek(Token![,]) {
+            let fork = input.fork();
+            let _: Token![,] = fork.parse()?;
+            let next_is_option = if let Ok(id) = fork.parse::<syn::Ident>() {
+                OPTION_KEYS.contains(&id.to_string().as_str())
+            } else {
+                false
+            };
+            if !next_is_option && !fork.is_empty() {
+                let _: Token![,] = input.parse()?;
+                bus = Some(input.parse()?);
+            }
+        }
+
+        // Trailing named options.
+        while input.peek(Token![,]) {
             let _: Token![,] = input.parse()?;
             if input.is_empty() {
-                None
-            } else {
-                Some(input.parse()?)
+                break;
             }
-        } else {
-            None
-        };
-        Ok(IncludeGeneratedArgs { state, bus })
+            options.push(input.parse()?);
+        }
+
+        Ok(IncludeGeneratedArgs {
+            state,
+            bus,
+            options,
+        })
+    }
+}
+
+impl syn::parse::Parse for ConfigOpt {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let key: syn::Ident = input.parse()?;
+        let name = key.to_string();
+        if name == "rust_only" {
+            return Ok(ConfigOpt::RustOnly);
+        }
+        let _: Token![=] = input.parse()?;
+        let value: syn::LitStr = input.parse()?;
+        Ok(match name.as_str() {
+            "custom_ts" => ConfigOpt::CustomTs(value),
+            "src_dir" => ConfigOpt::SrcDir(value),
+            "generated_rs" => ConfigOpt::GeneratedRs(value),
+            "client_dir" => ConfigOpt::ClientDir(value),
+            "api_modules_prefix" => ConfigOpt::ApiModulesPrefix(value),
+            "skip_file" => ConfigOpt::SkipFile(value),
+            _ => {
+                return Err(syn::Error::new(
+                    key.span(),
+                    format!(
+                        "unknown draad option `{name}`; expected one of \
+                         custom_ts, src_dir, generated_rs, client_dir, \
+                         api_modules_prefix, skip_file, rust_only"
+                    ),
+                ))
+            }
+        })
     }
 }
 
@@ -227,7 +353,18 @@ fn expand_include_generated(args: IncludeGeneratedArgs) -> syn::Result<TokenStre
         )
     })?;
 
-    let cfg = draad_codegen::Config::new().root(&manifest_dir);
+    let mut cfg = draad_codegen::Config::new().root(&manifest_dir);
+    for opt in &args.options {
+        cfg = match opt {
+            ConfigOpt::CustomTs(s) => cfg.custom_ts(s.value()),
+            ConfigOpt::SrcDir(s) => cfg.src_dir(s.value()),
+            ConfigOpt::GeneratedRs(s) => cfg.generated_rs(s.value()),
+            ConfigOpt::ClientDir(s) => cfg.client_dir(s.value()),
+            ConfigOpt::ApiModulesPrefix(s) => cfg.api_modules_prefix(s.value()),
+            ConfigOpt::SkipFile(s) => cfg.skip_file(s.value()),
+            ConfigOpt::RustOnly => cfg.rust_only(),
+        };
+    }
     let artifacts = draad_codegen::run(&cfg).map_err(|e| {
         syn::Error::new(
             proc_macro2::Span::call_site(),

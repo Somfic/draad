@@ -1,7 +1,7 @@
 mod common;
 
 #[test]
-fn emits_route_for_draad_qualified_attribute() {
+fn aggregator_wires_apply_routes_for_qualified_attribute() {
     let root = common::fresh_root("qualified");
     std::fs::write(
         root.join("src/search.rs"),
@@ -19,7 +19,24 @@ pub trait SearchApi {
 
     let out = common::run(&root);
     assert!(
-        out.contains("/search/query"),
+        out.contains("crate::api::search::__draad_search_apply_routes(router)"),
         "qualified-path attribute should be detected; got:\n{out}"
+    );
+}
+
+#[test]
+fn module_chunk_emits_route_for_qualified_attribute() {
+    let out = common::module_rust(
+        r#"
+#[draad::api(namespace = "search")]
+pub trait SearchApi {
+    async fn query(&self, q: String) -> Result<Vec<Hit>, MyError>;
+}
+"#,
+        "search",
+    );
+    assert!(
+        out.contains(".route(\"/search/query\""),
+        "qualified-path attribute should produce a route; got:\n{out}"
     );
 }

@@ -33,6 +33,7 @@
 //!     .unwrap();
 //! ```
 
+mod bus;
 mod config;
 mod emit_rust;
 mod emit_ts;
@@ -45,5 +46,7 @@ mod types;
 mod util;
 mod writer;
 
+pub use bus::Bus;
 pub use config::Config;
+pub use emit_rust::{render_module_events, render_module_rust};
 pub use pipeline::{generate, run, Artifacts};
